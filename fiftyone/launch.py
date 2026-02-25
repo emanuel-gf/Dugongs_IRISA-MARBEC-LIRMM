@@ -128,6 +128,10 @@ if __name__ == "__main__":
         dataset.persistent = True
         print(f"{name} - was created and saved as a persistent dataset.")
 
+        ## compute metadata
+        dataset.compute_metadata()
+        dataset.save()
+
     ## debugg
     # dataset = fo.Dataset.from_dir(
     #         dataset_dir=images_path,
@@ -142,4 +146,6 @@ if __name__ == "__main__":
 
     # Ensures that the App processes are safely launched on Windows
     session = fo.launch_app(dataset)
-    session.wait()
+    # View the dataset's current App config
+    print(dataset.app_config)
+    # session.wait()

@@ -187,7 +187,7 @@ def find_sub_data_sources(base_dir):
     return sources
 
  
-def main(root_dir, launch, path_NC_csv, path_WP_csv, name_dataset="Domain-Shift"):
+def main(root_dir:str, launch:bool, path_NC_csv:str, path_WP_csv:str, name_dataset:str="Domain-Shift"):
     """ 
     Construct or load the dataset and launch the session if requested.
     The name_dataset will be used to either import and existent class 
@@ -206,6 +206,9 @@ def main(root_dir, launch, path_NC_csv, path_WP_csv, name_dataset="Domain-Shift"
     ## csv paths
     full_path_NC_csv=path_NC_csv
     full_path_WP_csv=path_WP_csv
+    if not os.path.exists(full_path_NC_csv):
+        print(f"Warning: The specified NC CSV path does not exist: {full_path_NC_csv}")
+
     ## name of the dataset to be created or loaded from memory
     name_dataset = name_dataset
 
@@ -299,6 +302,11 @@ def main(root_dir, launch, path_NC_csv, path_WP_csv, name_dataset="Domain-Shift"
     wp_view = dataset.match_tags("WP")
     dataset.save_view("New_Caledonia", nc_view)
     dataset.save_view("West_Papua", wp_view)
+    info = dict(
+        name="West_Papua",
+        description="West Papua subset samples with tags.",
+        )
+    dataset.update_saved_view_info("West_Papua", info)
 
     if launch:
         # Ensures that the App processes are safely launched on Windows
@@ -312,9 +320,9 @@ if __name__ == "__main__":
     parser.add_argument("--root",'-r', help="Root directory of the dataset.", default="/home/camarada/Documents/CDE/thesis/dataset_raw/DATASET")
     parser.add_argument("--NCcsv", help="Path to the New Caledonia CSV file.", default="/home/camarada/Documents/CDE/thesis/dataset_raw/DATASET/NC/dugong_environmental_variables_NC.csv")
     parser.add_argument("--WPcsv", help="Path to the West Papua CSV file.", default="/home/camarada/Documents/CDE/thesis/dataset_raw/DATASET/WP/dugong_environmental_variables_WP.xlsx")
-    parser.add_argument("--launch","-l", help="Either launch or not.", default=True)
+    parser.add_argument("--launch","-l", help="Either launch or not.", default=False)
     parser.add_argument("--name_dataset",'-n', help="Name of the dataset to be created or loaded.", default="Domain-Shift")
     args = parser.parse_args()
-    
+    print(f"Args: {args}")
     ## create dataset and launch
     main(args.root, args.launch, args.NCcsv, args.WPcsv, name_dataset=args.name_dataset)

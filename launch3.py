@@ -3,7 +3,8 @@ import os
 import pandas as pd 
 from pathlib import Path
 import numpy as np
-import glob
+import argparse 
+
 
 def parse_yolo_file(ann_path, sample_root):
     """
@@ -186,19 +187,27 @@ def find_sub_data_sources(base_dir):
     return sources
 
  
-     
-if __name__ == "__main__":
+def main(root_dir, launch, path_NC_csv, path_WP_csv, name_dataset="Domain-Shift"):
+    """ 
+    Construct or load the dataset and launch the session if requested.
+    The name_dataset will be used to either import and existent class 
+    or create a new class with the given name. 
+
+    Args:
+        root_dir: str - The root directory where the dataset is located.
+        launch: bool - Whether to launch the FiftyOne App after dataset creation/loading.
+        path_NC_csv: str - Path to the New Caledonia CSV file.
+        path_WP_csv: str - Path to the West Papua CSV file.
+        name_dataset: str - The name to use for the FiftyOne dataset.
+    """
     ## construct dict of paths based on the unzip structure.
-    root_dir = "/home/camarada/Documents/CDE/thesis/dataset_raw/DATASET"
+    root_dir = root_dir
 
     ## csv paths
-    full_path_NC_csv="/home/camarada/Documents/CDE/thesis/dataset_raw/DATASET/NC/dugong_environmental_variables_NC.csv"
-    full_path_WP_csv="/home/camarada/Documents/CDE/thesis/dataset_raw/DATASET/WP/dugong_environmental_variables_WP.xlsx"
-
-    ## construct map dict with paths and tags for each sub dataset. 
-    sub_ds_list = find_sub_data_sources(root_dir)
-
-    name_dataset = "Domain-Shift"
+    full_path_NC_csv=path_NC_csv
+    full_path_WP_csv=path_WP_csv
+    ## name of the dataset to be created or loaded from memory
+    name_dataset = name_dataset
 
     list_columns_keep = ['sea_state', 'turbidity_global', 
                             'turbidity_local', 'sun_glitter', 'cloud_reflection',
@@ -206,6 +215,9 @@ if __name__ == "__main__":
                             'open_sea','sparse_seagrass'
                         ]
     
+    ## construct map dict with paths and tags for each sub dataset. 
+    sub_ds_list = find_sub_data_sources(root_dir)
+
     ## Try to load the dataset first instead of creating every time.
     if name_dataset in fo.list_datasets():
         # Load the existing one from the DB 
@@ -281,10 +293,28 @@ if __name__ == "__main__":
         dataset.compute_metadata()
         dataset.save()
 
-    ## debugg
 
-    # Ensures that the App processes are safely launched on Windows
-    session = fo.launch_app(dataset)
-    # View the dataset's current App config
-    print(dataset.app_config)
-    session.wait()
+    ## Create essencial views - WP and NC
+    nc_view = dataset.match_tags("NC")
+    wp_view = dataset.match_tags("WP")
+    dataset.save_view("New_Caledonia", nc_view)
+    dataset.save_view("West_Papua", wp_view)
+
+    if launch:
+        # Ensures that the App processes are safely launched on Windows
+        session = fo.launch_app(dataset)
+        # View the dataset's current App config
+        print(dataset.app_config)
+        session.wait()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Create Dataset and Launch Session.")
+    parser.add_argument("--root",'-r', help="Root directory of the dataset.", default="/home/camarada/Documents/CDE/thesis/dataset_raw/DATASET")
+    parser.add_argument("--NCcsv", help="Path to the New Caledonia CSV file.", default="/home/camarada/Documents/CDE/thesis/dataset_raw/DATASET/NC/dugong_environmental_variables_NC.csv")
+    parser.add_argument("--WPcsv", help="Path to the West Papua CSV file.", default="/home/camarada/Documents/CDE/thesis/dataset_raw/DATASET/WP/dugong_environmental_variables_WP.xlsx")
+    parser.add_argument("--launch","-l", help="Either launch or not.", default=True)
+    parser.add_argument("--name_dataset",'-n', help="Name of the dataset to be created or loaded.", default="Domain-Shift")
+    args = parser.parse_args()
+    
+    ## create dataset and launch
+    main(args.root, args.launch, args.NCcsv, args.WPcsv, name_dataset=args.name_dataset)

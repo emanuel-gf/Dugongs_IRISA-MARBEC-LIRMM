@@ -91,7 +91,45 @@ def preprocess_csv(df, list_column_exhibit):
 
     if 'label_name' not in df.columns:
         raise KeyError("The DataFrame must contain either 'label_name' or 'picture_name' column for matching.")
+
+    ## Handle the cloud_reflection AND sun_glitter
+    ## there are conflicting values that need to be fixed
+    def fix_col_cloud(string):
+        if string.strip().lower() == '0':
+            return '0-0'
+        elif string.strip() == '':
+            return 'No-value'
+        else:
+            return string
+    if 'cloud_reflection' in df.columns:
+        df['cloud_reflection'] = df['cloud_reflection'].astype('str').apply(lambda x:fix_col_cloud(x))
+    
+    if 'sun_glitter' in df.columns:
+        df['sun_glitter'] = df['sun_glitter'].astype('str').apply(lambda x:fix_col_cloud(x))
+    
+    # handle missing values globally before filtering
+    # We use a loop to fill based on the current data type of the column
+    for col in list_column_exhibit:
+        if col not in df.columns:
+            print(f"Col: {col} not found in df. Please check csv and list_column_exhibit")
+            continue
             
+        try:
+            # Check the type of the column and provide an appropriate "Zero" value
+            if pd.api.types.is_numeric_dtype(df[col]):
+                if pd.api.types.is_integer_dtype(df[col]):
+                    df[col] = df[col].fillna(0)
+                else:
+                    df[col] = df[col].fillna(0.0)
+            elif pd.api.types.is_bool_dtype(df[col]):
+                df[col] = df[col].fillna(False)
+            else:
+                # Default for objects/strings
+                df[col] = df[col].fillna("Unknown")
+        except Exception as e:
+            print(f"Warning: Could not fill NaNs in column {col}: {e}")
+            df[col] = df[col].fillna("None")     
+
     # Create the stem column for matching
     df['stem_filename'] = df['label_name'].apply(lambda x: Path(x).stem)
     
@@ -162,88 +200,91 @@ if __name__ == "__main__":
 
     name_dataset = "Domain-Shift"
 
-    list_columns_keep = ['altitude',
-                            'resolution', 'sea_state', 'turbidity_global', 
+    list_columns_keep = ['sea_state', 'turbidity_global', 
                             'turbidity_local', 'sun_glitter', 'cloud_reflection',
                             'habitat_type', 'background_complexity', 'coral', 'sand', 'dense_seagrass',
                             'open_sea','sparse_seagrass'
-                            ]
+                        ]
     
-    # if name_dataset in fo.list_datasets():
-    #     # Load the existing one from the DB (much faster!)
-    #     dataset = fo.load_dataset(name_dataset)
-    #     print("Dataset loaded from database.")
-    # else:
+    ## Try to load the dataset first instead of creating every time.
+    if name_dataset in fo.list_datasets():
+        # Load the existing one from the DB 
+        dataset = fo.load_dataset(name_dataset)
+        print("Dataset loaded from database.")
+    else:
+        ## Create the dataset in case does not exist 
+        dataset = fo.Dataset(name=name_dataset, overwrite=True)
+        dataset.persistent = True
+        print(f"{name_dataset} - was created and saved as a persistent dataset.")
 
+        ## Loop over all the regions and subregions 
+        ## create a list for baching
+        samples_to_add = []
+        region_prev = None
+        for sub_dataset in sub_ds_list:
+            print(f"Processing sub-dataset: {sub_dataset['mission_name']} <> {sub_dataset['subregion']} <> {sub_dataset['region']}")
+
+            image_dir_path = sub_dataset['images']
+            label_dir_path = sub_dataset['labels']
+            region = sub_dataset['region'] ## region for csv matching
+            tags = [sub_dataset['mission_name'], sub_dataset['subregion'], sub_dataset['region']] ## tags list
+
+            ## find the proper csv
+            csv_path = find_proper_csv_environmental_variables(region,
+                                                                full_path_NC_csv=full_path_NC_csv,
+                                                                full_path_WP_csv=full_path_WP_csv)
+
+            ## check if the csv path was already loaded
+            if region != region_prev:
+                df = load_df_from_csv(csv_path)
+                field_columns_mapdict = preprocess_csv(df, list_columns_keep)
+                region_prev = region
+                
+
+            ## SAMPLE CREATION
+            ## loop through the img_dir 
+            for image_filepath in Path(image_dir_path).rglob("*.jpeg"):
+                sample = fo.Sample(filepath = str(image_filepath))
+
+                ## tags
+                sample["tags"] = tags
+                sample['region'] = region
+                sample['subregion'] = sub_dataset['subregion']
+                sample['mission_name'] = sub_dataset['mission_name']
+                
+                ## add field columns
+                sample_root = image_filepath.stem
+        
+                if sample_root in field_columns_mapdict:
+                    data = field_columns_mapdict[sample_root]
+
+                    # add ecological variables columns
+                    for col in list_columns_keep:
+                        val = data.get(col)
+
+                        #safety check: skip values that are still effectively null
+                        if val is not None and not (isinstance(val, float) and np.isnan(val)):
+                            sample[col] = val
+
+                # Handle Labels (YOLO)
+                yolo_labels = parse_yolo_file(label_dir_path, sample_root)
+                if yolo_labels:
+                    sample["ground_truth"] = yolo_labels
+                
+                ## save sample
+                samples_to_add.append(sample)
+
+        print("Batching all inside dataset")
+        dataset.add_samples(samples_to_add, progress=True)
+        print(f"All sub-datasets have been processed and added to the '{name_dataset}' dataset.")
         # ## compute metadata
-        # dataset.compute_metadata()
-        # dataset.save()
+        dataset.compute_metadata()
+        dataset.save()
 
     ## debugg
-    dataset = fo.Dataset(name=name_dataset, overwrite=True)
-    dataset.persistent = True
-    print(f"{name_dataset} - was created and saved as a persistent dataset.")
-
-    ## 
-    region_prev = None
-    for sub_dataset in sub_ds_list:
-        print(f"Processing sub-dataset: {sub_dataset['mission_name']} <> {sub_dataset['subregion']} <> {sub_dataset['region']}")
-
-        image_dir_path = sub_dataset['images']
-        label_dir_path = sub_dataset['labels']
-        region = sub_dataset['region'] ## region for csv matching
-        tags = [sub_dataset['mission_name'], sub_dataset['subregion'], sub_dataset['region']] ## tags list
-
-        ## find the proper csv
-        csv_path = find_proper_csv_environmental_variables(region,
-                                                            full_path_NC_csv=full_path_NC_csv,
-                                                            full_path_WP_csv=full_path_WP_csv)
-
-        ## check if the csv path was already loaded
-        if region != region_prev:
-            df = load_df_from_csv(csv_path)
-            field_columns_mapdict = preprocess_csv(df, list_columns_keep)
-            region_prev = region
-            
-
-        ## SAMPLE CREATION
-        ## loop through the img_dir 
-        for image_filepath in Path(image_dir_path).rglob("*.jpeg"):
-            sample = fo.Sample(filepath = str(image_filepath))
-
-            ## tags
-            sample["tags"] = tags
-            sample['region'] = region
-            sample['subregion'] = sub_dataset['subregion']
-            sample['mission_name'] = sub_dataset['mission_name']
-            
-            ## add field columns
-            sample_root = image_filepath.stem
-    
-            if sample_root in field_columns_mapdict:
-                data = field_columns_mapdict[sample_root]
-
-                # add ecological variables columns
-                # Use .get() to avoid KeyErrors if a column is missing
-                for col in list_columns_keep:
-                    sample[col] = data.get(col)
-
-            # Handle Labels (YOLO)
-            yolo_labels = parse_yolo_file(label_dir_path, sample_root)
-            if yolo_labels:
-                sample["ground_truth"] = yolo_labels
-            
-            ## save and add it
-            sample.save()
-            dataset.add_samples(sample)
-
-    print(f"All sub-datasets have been processed and added to the '{name_dataset}' dataset.")
-    # ## compute metadata
-    dataset.compute_metadata()
-    dataset.save()
 
     # Ensures that the App processes are safely launched on Windows
-    # session = fo.launch_app(dataset)
-    # # View the dataset's current App config
-    # print(dataset.app_config)
-    # # session.wait()
+    session = fo.launch_app(dataset)
+    # View the dataset's current App config
+    print(dataset.app_config)
+    session.wait()

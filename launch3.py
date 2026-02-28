@@ -202,7 +202,7 @@ def main(root_dir:str, launch:bool, path_NC_csv:str, path_WP_csv:str, name_datas
     """
     ## construct dict of paths based on the unzip structure.
     root_dir = root_dir
-
+    launch = bool(launch)
     ## csv paths
     full_path_NC_csv=path_NC_csv
     full_path_WP_csv=path_WP_csv
@@ -298,6 +298,7 @@ def main(root_dir:str, launch:bool, path_NC_csv:str, path_WP_csv:str, name_datas
 
 
     ## Create essencial views - WP and NC
+    print("Computing views")
     nc_view = dataset.match_tags("NC")
     wp_view = dataset.match_tags("WP")
     dataset.save_view("New_Caledonia", nc_view)

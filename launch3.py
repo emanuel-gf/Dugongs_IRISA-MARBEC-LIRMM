@@ -167,7 +167,7 @@ def find_sub_data_sources(base_dir):
 
         if parent_1.name == "NC":
             region = parent_1.name
-            subregion = "None"
+            subregion = "NC" #  don't have subregions for NC
 
         elif parent_2.name == "WP":
             region = parent_2.name

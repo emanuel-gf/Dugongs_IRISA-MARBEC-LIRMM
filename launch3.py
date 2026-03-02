@@ -187,7 +187,7 @@ def find_sub_data_sources(base_dir):
     return sources
 
  
-def main(root_dir:str, launch:bool, path_NC_csv:str, path_WP_csv:str, name_dataset:str="Domain-Shift"):
+def main(root_dir:str, launch:[bool,str], path_NC_csv:str, path_WP_csv:str, name_dataset:str="Domain-Shift"):
     """ 
     Construct or load the dataset and launch the session if requested.
     The name_dataset will be used to either import and existent class 
@@ -203,6 +203,19 @@ def main(root_dir:str, launch:bool, path_NC_csv:str, path_WP_csv:str, name_datas
     ## construct dict of paths based on the unzip structure.
     root_dir = root_dir
     launch = launch
+
+    ## launch
+    def convert_bool(value:str) -> bool :
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            if value.strip().lower() in ['true', '1', 'yes']:
+                return True
+            else:
+                return False
+    launch = convert_bool(launch)
+    assert isinstance(launch, bool), f"Expected boolean value for launch, got {type(launch)}"
+
     ## csv paths
     full_path_NC_csv=path_NC_csv
     full_path_WP_csv=path_WP_csv
@@ -321,7 +334,7 @@ if __name__ == "__main__":
     parser.add_argument("--root",'-r', help="Root directory of the dataset.", default="/home/camarada/Documents/CDE/thesis/dataset_raw/DATASET")
     parser.add_argument("--NCcsv", help="Path to the New Caledonia CSV file.", default="/home/camarada/Documents/CDE/thesis/dataset_raw/DATASET/NC/dugong_environmental_variables_NC.csv")
     parser.add_argument("--WPcsv", help="Path to the West Papua CSV file.", default="/home/camarada/Documents/CDE/thesis/dataset_raw/DATASET/WP/dugong_environmental_variables_WP.xlsx")
-    parser.add_argument("--launch","-l", help="Launch the FiftyOne App.", action="store_true")
+    parser.add_argument("--launch","-l", help="Launch the FiftyOne App.")
     parser.add_argument("--name_dataset",'-n', help="Name of the dataset to be created or loaded.", default="Domain-Shift")
     args = parser.parse_args()
     print(f"Args: {args}")

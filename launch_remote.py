@@ -15,8 +15,8 @@ def get_args():
                         default="/share/home/e2406743/dataset/NC/dugong_environmental_variables_NC.csv")
     parser.add_argument("--WPcsv", help="Path to WP CSV.", 
                         default="/share/home/e2406743/dataset/WP/dugong_environmental_variables_WP.xlsx")
-    parser.add_argument("--path_database", help="Folder for MongoDB (e.g., /tmp/my_db)")
-    parser.add_argument("--port_database", help="Port for MongoDB (0 for random)", default="0")
+    parser.add_argument("--path_database", help="Folder for MongoDB (e.g., /tmp/my_db)", default = None)
+    parser.add_argument("--port_database", help="Port for MongoDB (0 for random)", default="44123")
     parser.add_argument("--launch", "-l", help="Launch the FiftyOne App")
     parser.add_argument("--name_dataset", '-n', help="Dataset name", default="Domain-Shift")
     return parser.parse_args()
@@ -227,6 +227,7 @@ def main():
         path_WP_csv: str - Path to the West Papua CSV file.
         name_dataset: str - The name to use for the FiftyOne dataset.
         path_database: str - The path where the MongoDB database should be stored.
+                                If None so defaults to the fiftyone default (e.g., /user/fiftyone/mongodb).
         path_port_db: str - The port for the MongoDB database (0 for random).
     """
     args = get_args()
@@ -235,8 +236,11 @@ def main():
     # We use environment variables because FiftyOne reads these during initialization.
     
     # Use provided path or default to a user-specific tmp folder
-    db_path = args.path_database if args.path_database else f"/tmp/{os.getlogin()}_fo_db"
-    
+    db_path = args.path_database
+    if db_path is None:
+        db_path = f"{os.login()}/fiftyone/mongodb"
+
+
     # Ensure a fresh start to avoid stale lock files on the node
     if os.path.exists(db_path):
         try:
@@ -249,12 +253,22 @@ def main():
     os.environ["FIFTYONE_DATABASE_DIR"] = db_path
     os.environ["FIFTYONE_DATABASE_PORT"] = args.port_database
 
-    print(f"--- DB SETUP: Path={db_path} | Port={args.port_database} ---")
+    print(f"DB Path:{db_path}")
+    print(f"--- CONNECTING TO MANUAL DB: localhost:44123 ---")
+
 
     # FIFTYONE ---
     import fiftyone as fo
     print(f"FiftyOne is using database at: {fo.config.database_dir}")
 
+    # Validation check: Ensure we are actually connected
+    try:
+        fo.list_datasets()
+        print(f"Connected to MongoDB successfully!")
+    except Exception as e:
+        print(f"ERROR: Could not connect to manual MongoDB at localhost:44123. \n{e}")
+        return
+    
     # pass the rest of the args ---
     name_dataset = args.name_dataset
     root_dir = args.root

@@ -1,6 +1,6 @@
 # Dugong Dataset Preprocessing with FiftyOne
 
-This project prepares a multi-mission dugong detection dataset for AI-engineered workflows using [FiftyOne](https://fiftyone.ai/), a powerful tool for dataset management and visualization.
+This project prepares a multi-mission dugong detection dataset for AI-engineered workflows using [FiftyOne](https://fiftyone.ai/), a tool for dataset management and visualization.
 
 ## About Dataset
 
@@ -21,9 +21,6 @@ This project prepares a multi-mission dugong detection dataset for AI-engineered
 
     For the WP dataset, there are many authors from Indonesia as the data was collected as part of [SELAMAT International Laboratory](https://www.ird.fr/lmi-selamat-sentinel-laboratory-indonesian-marine-biodiversity).
 
-## Overview
-
-The `launch3.py` script processes raw YOLO-annotated dugong images from multiple missions and regions, enriches them with environmental metadata, and organizes them into a FiftyOne Dataset for analysis and training.
 
 ## What is FiftyOne Dataset?
 
@@ -35,11 +32,69 @@ FiftyOne's `Dataset` class is a structured container for managing computer visio
 - **Persistence**: Can save datasets to disk for reproducibility and sharing
 - **Interactive visualization**: Integrates with FiftyOne's App for easy data exploration
 
-In this project, each `Sample` represents one dugong observation image, with:
-- Image filepath
+In this project, each `Sample` represents *one dugong* observation, with:
+- Image filepath 
 - YOLO bounding box annotations (converted to FiftyOne format)
 - Environmental metadata (altitude, turbidity, habitat type, etc.)
 - Organizational tags (mission name, region, subregion)
+
+## Getting Started
+
+### How to replicate Fiftyone in the dataset
+
+The `launch3.py` script processes raw YOLO-annotated dugong images from multiple missions and regions, enriches them with environmental metadata, and organizes them into a FiftyOne Dataset for analysis and training.
+
+Launch locally on your computer by:
+
+### 1. Install Dependencies
+
+Use uv or conda to manage dependencies, fiftyone expect the system has already a mongodb instance installed.
+In conda, you can do: `conda-forge mondogb`, I am recommending uv here, but if you use conda :
+
+    1. cd to the project folder
+    ```
+    cd your_project_folder
+    ```
+    2. Start a new venv inside the folder 
+    ```
+    uv venv
+    ```
+    Activate the env
+    ```
+    source .venv/bin/activate ##Linux
+    ```
+    3. Sync the project
+    ```
+    uv sync
+    ```
+    4. In conda you can simple import requiments
+    ```
+    pip install -r requirements.txt
+    ```
+
+You can test if the fiftyone was properly install by:
+
+```
+import fiftyone as fo
+
+print(fo.list_dataset())
+```
+
+Check more information about installing at the official [fiftyone website](https://docs.voxel51.com/installation/index.html)
+
+### 2. Launch
+
+After all the system requirements meet, you can easily launch the dataset from the raw zip file. 
+```bash
+unzip dataset.zip
+```
+Pass all the args in the launcher file. 
+```bash
+python launch3.py --root your_path_to_the_unzip_dataset_folder --NCcsv full_path_to_NC_csv  --WPcsv full_path_to_WP_xlsx --launch true --name_dataset dugong 
+```
+This will create the fiftyone dataset instance and launch a web-ui session. 
+
+
 
 ## Directory Structure & Organization
 
@@ -64,6 +119,8 @@ dataset_raw/DATASET/
 
 ### Processing Pipeline
 
+It describes how to dataset folder is being processed to create a Dataset instance of fiftyone. 
+
 1. **Discovery** (`find_sub_data_sources()`): Recursively finds all `images/` directories and pairs them with their sibling `labels_yolo/` folders, extracting region and mission metadata
 
 2. **CSV Loading** (`load_df_from_csv()`): Loads environmental metadata from region-specific CSV/XLSX files
@@ -78,42 +135,11 @@ dataset_raw/DATASET/
    - Attach environmental variables as custom fields
    - Attach YOLO detections as ground truth bounding boxes
 
-## Quick Start Example
-
-### Dependencies
-
-Use uv to manage dependencies:
-
-    1. cd to the project folder
-    ```
-    cd your_project_folder
-    ```
-
-    2. Start a new venv inside the folder 
-    ```
-    uv venv
-    ```
-
-    Activate the env
-    ```
-    source .venv/bin/activate ##Linux
-    ```
-
-    3. Sync the project
-    ```
-    uv sync
-    ```
-
-
-### Launch
-
-```bash
-python launch3.py
-```
 
 ## Additional information
 
-Ecological paper that relied on this dataset to map the population of [dugongs](https://onlinelibrary.wiley.com/doi/full/10.1002/aqc.4237)
+
+ - Ecological paper that relied on this dataset to map the population of [dugongs](https://onlinelibrary.wiley.com/doi/full/10.1002/aqc.4237)
 ---
 
 **BIG NOTE** The dataset is not currently public available. 

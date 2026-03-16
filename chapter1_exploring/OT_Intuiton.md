@@ -147,3 +147,19 @@ It represents the same for either `ot.emd(a,b,M)` or `ot.da.SinkhornTransport().
 
 However, `ot.emd` is a linear solver with $O(n^3)$ for small dasets <5k. Sinkhorn produces an entropic regularization with an approximation of $T^*$ ,scaling well to large datasets.
 
+## Cosine SImilarity 
+
+$$ \text{similarity}(x, y) = \frac{x \cdot y}{|x| |y|} = \frac{\sum_{i=1}^n x_i y_i}{\sqrt{\sum_{i=1}^n x_i^2} \cdot \sqrt{\sum_{i=1}^n y_i^2}} $$
+
+## Euclidean Distance:
+
+Euclidean distance measures the straight-line distance in the vector space.
+$$ d(x, y) = \sqrt{\sum_{i=1}^n (x_i - y_i)^2} $$
+
+##  Mixeed approach
+
+Combine SSIM and embedding metrics (e.g., Cosine Similarity):
+$$ \text{HybridScore}(x, y) = \alpha \cdot \text{SSIM-Score}(x, y) + \beta \cdot \text{Embedding-Metric}(x, y) $$
+
+• Weights (α, β): Control the contribution of visual metrics vs. embedding alignment.  • A higher α prioritizes raw visual features (useful early in modeling).
+  • A higher β emphasizes semantic embedding-level relationships (useful post-tuning).

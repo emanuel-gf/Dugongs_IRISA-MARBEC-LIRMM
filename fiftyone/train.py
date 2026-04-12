@@ -124,6 +124,38 @@ def mapdict_patches_filepath(list_paths, patch_folder):
 
     return filepath_all_images, filepath_all_labels, filepath_all_metadata
 
+def create_train_test_split_for_nc(nc_train_list, seed_number:int):
+    """
+    split the NC dataset filepaths in train, test and val for train the model and test on NC region. 
+    Args:
+        
+    """
+    from sklearn.model_selection import train_test_split
+    train_size = 0.7
+    test_size = 0.2
+    val_size = 0.1
+    seed_number = int(seed_number)
+    assert type(seed_number)==int
+
+    # Split off the TEST set (20%) ---
+    # Stratify ensures the 'high complexity' ratio stays the same
+    train_val_ids, test_ids = train_test_split(
+        nc_train_list, 
+        test_size= test_size, 
+        shuffle=True, 
+        random_state=seed_number
+    )
+
+
+    # Split remaining 80% into Train (70% total) and Val (10% total) ---
+    # 0.125 * 0.8 = 0.1 (which is 10% of the original total)
+    train_ids, val_ids = train_test_split(
+        train_val_ids, 
+        test_size= (val_size/(1-test_size)),
+        random_state=seed_number
+    )
+    return train_ids, test_ids, val_ids
+    
 # ─────────────────────────────────────────────
 # Dataset
 
@@ -162,8 +194,6 @@ class DugongDataset(Dataset):
             return_tensors="pt",
         )
         return encoding["pixel_values"].squeeze(0), encoding["labels"][0]
-
-
 
 
 
@@ -346,12 +376,13 @@ class RTDETRLightningModule(pl.LightningModule):
         weight_decay: float = 1e-4,
         max_epochs: int = 50,
         id2label: dict | None = None,
-        use_augmentation = False
+        use_augmentation = False,
     ):
         super().__init__()
         self.save_hyperparameters("lr", "weight_decay", "max_epochs")
  
-        self.model     = RTDetrForObjectDetection.from_pretrained(checkpoint)
+        self.model = RTDetrForObjectDetection.from_pretrained(
+            checkpoint)
         self.augmentor = DugongAugmentor() if use_augmentation else None
         self.id2label  = id2label or {0: "dugong"}
         self._first_batch_done = False
@@ -388,7 +419,54 @@ class RTDETRLightningModule(pl.LightningModule):
  
     def forward(self, pixel_values, labels=None):
         return self.model(pixel_values=pixel_values, labels=labels)
+    
+    ## WEIGHT AND BIAS 
+    def _log_loss_dict(self, prefix: str, loss: torch.Tensor, loss_dict: dict):
+        """
+        Log losses to W&B with a clean, epoch-only grouping:
  
+        W&B panel layout
+        ────────────────
+        {prefix}/loss              ← total loss (main progress metric)
+        {prefix}/main/loss_vfl     ← varifocal classification loss
+        {prefix}/main/loss_bbox    ← L1 box regression loss
+        {prefix}/main/loss_giou    ← GIoU box loss
+        {prefix}/aux/loss_vfl      ← mean across all auxiliary heads
+        {prefix}/aux/loss_bbox
+        {prefix}/aux/loss_giou
+ 
+        Auxiliary losses (loss_*_aux_N) are averaged across decoder layers
+        so you get one clean line per loss type instead of 6 noisy ones.
+        on_step=False everywhere → W&B x-axis is always epoch, never step.
+        """
+        batch_size = self.trainer.datamodule.batch_size
+        sync = prefix == "train"   # only reduce across GPUs during training
+ 
+        # total loss
+        self.log(f"{prefix}/loss", loss,
+                 on_step=False, on_epoch=True, prog_bar=True,
+                 sync_dist=sync, batch_size=batch_size)
+ 
+        # split main vs aux
+        main_losses, aux_accum = {}, {}
+        for k, v in loss_dict.items():
+            if "_aux_" in k:
+                # e.g. "loss_vfl_aux_3" → base key "loss_vfl"
+                base = k.split("_aux_")[0]          # "loss_vfl"
+                aux_accum.setdefault(base, []).append(v)
+            else:
+                main_losses[k] = v
+ 
+        for k, v in main_losses.items():
+            self.log(f"{prefix}/main/{k}", v,
+                     on_step=False, on_epoch=True,
+                     sync_dist=sync, batch_size=batch_size)
+ 
+        for base, vals in aux_accum.items():
+            mean_val = torch.stack(vals).mean()
+            self.log(f"{prefix}/aux/{base}", mean_val,
+                     on_step=False, on_epoch=True,
+                     sync_dist=sync, batch_size=batch_size)
     # ── training ─────────────────────────────────────────────────────────
  
     def training_step(self, batch, batch_idx):
@@ -423,11 +501,13 @@ class RTDETRLightningModule(pl.LightningModule):
 
  
         outputs = self(pixel_values, labels)
+        self._log_loss_dict("train", outputs.loss, outputs.loss_dict)
         loss    = outputs.loss
- 
-        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-        for k, v in outputs.loss_dict.items():
-            self.log(f"train/{k}", v, on_step=False, on_epoch=True)
+
+        ## old
+        # self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        # for k, v in outputs.loss_dict.items():
+        #     self.log(f"train/{k}", v, on_step=False, on_epoch=True)
  
         return loss
  
@@ -435,18 +515,20 @@ class RTDETRLightningModule(pl.LightningModule):
  
     def validation_step(self, batch, batch_idx):
         loss, loss_dict = self._eval_step(batch)
-        self.log("val/loss", loss, on_epoch=True, prog_bar=True)
-        for k, v in loss_dict.items():
-            self.log(f"val/{k}", v, on_epoch=True)
+        self._log_loss_dict("val", loss, loss_dict)
+        # self.log("val/loss", loss, on_epoch=True, prog_bar=True)
+        # for k, v in loss_dict.items():
+        #     self.log(f"val/{k}", v, on_epoch=True)
         return loss
  
     # ── test ─────────────────────────────────────────────────────────────
  
     def test_step(self, batch, batch_idx):
         loss, loss_dict = self._eval_step(batch)
-        self.log("test/loss", loss, on_epoch=True, prog_bar=True)
-        for k, v in loss_dict.items():
-            self.log(f"test/{k}", v, on_epoch=True)
+        self._log_loss_dict("test", loss, loss_dict)
+        # self.log("test/loss", loss, on_epoch=True, prog_bar=True)
+        # for k, v in loss_dict.items():
+        #     self.log(f"test/{k}", v, on_epoch=True)
         return loss
  
     # ── optimizer ────────────────────────────────────────────────────────
@@ -473,7 +555,7 @@ def run_inference(
 ) -> list[dict]:
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
- 
+    os.makedirs(output_dir,exist_ok=True)
     model    = lightning_module.model.to(device).eval()
     id2label = lightning_module.id2label
     results  = []
@@ -540,7 +622,8 @@ def train(
     logger.success(f"Processor loaded from '{checkpoint}'")
  
     lit_model = RTDETRLightningModule(
-        checkpoint=checkpoint, lr=lr, weight_decay=weight_decay,
+        checkpoint=checkpoint, 
+        lr=lr, weight_decay=weight_decay,
         max_epochs=max_epochs, id2label=id2label, use_augmentation=use_augmentation
         )
     logger.success("Lightning module instantiated")
@@ -560,7 +643,7 @@ def train(
         mode="min",
         save_top_k=3,
         save_last=False,
-        every_n_epochs=10,
+        #every_n_epochs=10,
     )
  
     wandb_logger = WandbLogger(
@@ -593,9 +676,9 @@ def train(
     trainer.fit(lit_model, datamodule=data_module)
     logger.success("Training complete")
  
-    logger.info("Evaluating best checkpoint on held-out test set …")
-    trainer.test(lit_model, datamodule=data_module, ckpt_path="best")
-    logger.success("Test evaluation complete")
+    #logger.info("Evaluating best checkpoint on held-out test set …")
+    #trainer.test(lit_model, datamodule=data_module, ckpt_path="best")
+    #logger.success("Test evaluation complete")
  
     return trainer, lit_model, processor
 
@@ -603,13 +686,14 @@ def train(
 # ─────────────────────────────────────────────
 # 7. Main
 # ─────────────────────────────────────────────
-
+PARTITIONS = ["NC", "partition_5", "partition_10", "partition_25",
+              "partition_50", "partition_75", "partition_100"]
+ 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train RT-DETR on dugong patches")
     parser.add_argument("--schema",       type=str, required=True,
                         help="Experiment schema label (e.g. 'v1', 'ablation')")
-    parser.add_argument("--partition",    type=str, required=True,
-                        choices=["NC", "partition_25"],
+    parser.add_argument("--partition",    type=str, required=True, choices=PARTITIONS,
                         help="Training partition strategy")
     parser.add_argument("--csvfile",      type=str, required=True,
                         help="CSV with train_seed / test_seed / val_seed / train_nc columns")
@@ -619,13 +703,108 @@ def parse_args():
                         default="/share/home/e2406743/dataset/exported_img/seed_42",
                         help="Root folder containing images/, labels/, metadata/ subfolders")
     parser.add_argument("--output-dir",   type=str, default="checkpoints")
+    parser.add_argument("--output-inference",   type=str, default="inference", 
+                        help="folder to store the inferences")
     parser.add_argument("--batch-size",   type=int, default=8)
     parser.add_argument("--max-epochs",   type=int, default=50)
     parser.add_argument("--lr",           type=float, default=1e-4)
     parser.add_argument("--wandb-project",type=str, default="rtdetr-dugong")
     parser.add_argument("--augment", action="store_true", default=False,
                         help="Enable data augmentation during training")
+    parser.add_argument("--hf-repo",      type=str, default=None,
+                        help="HF Hub repo id (e.g. 'username/rtdetr-dugong-nc'). "
+                             "NC run pushes here; partition runs load from here.")
+    parser.add_argument("--hf-revision",  type=str, default="nc-best",
+                        help="Git revision (branch/tag) used when pushing and loading. "
+                             "Keeps multiple experiments in the same repo without overwriting. "
+                             "Default: 'nc-best'")
+    parser.add_argument("--nc-checkpoint-dir", type=str, default=None,
+                        help="Local directory containing NC weights saved with save_pretrained() "
+                             "(e.g. checkpoints/schema_NC_MMDD_HHMM/hf_export). "
+                             "Required for partition_* runs.")
     return parser.parse_args()
+
+
+def _save_and_push(
+    model: RTDETRLightningModule,
+    processor: RTDetrImageProcessor,
+    local_dir: str,
+    hf_repo: str,
+    #hf_revision: str,
+):
+    """
+    Save the HF model + processor locally with save_pretrained(), then push
+    to the Hub on a named revision (git branch/tag).
+ 
+    Why save_pretrained() instead of push_to_hub() directly?
+    ─────────────────────────────────────────────────────────
+    • model.model is the raw HF model inside the Lightning wrapper —
+      save_pretrained() is the correct, stable API for it.
+    • Saving locally first gives you a backup and lets you inspect the files
+      (config.json, model.safetensors) before they leave the machine.
+    • Pushing to a *revision* means multiple experiments can live in the same
+      repo without overwriting each other. Fine-tuning jobs then load from
+      that exact revision, so there is zero ambiguity about which weights
+      they receive.
+ 
+    On the Hub, revisions are ordinary git branches:
+        https://huggingface.co/{hf_repo}/tree/{hf_revision}
+    """
+    token = os.environ.get("HUGGING_FACE_API")
+    assert token, "Provide --hf-token or set HF_TOKEN env var"
+ 
+    local_dir = Path(local_dir)
+    local_dir.mkdir(parents=True, exist_ok=True)
+ 
+    # ── save locally ─────────────────────────────────────────────────────
+    logger.info(f"Saving model locally → {local_dir}")
+    model.model.save_pretrained(local_dir)      # writes config.json + model.safetensors
+    processor.save_pretrained(local_dir)        # writes preprocessor_config.json
+    logger.success(f"Model saved to {local_dir}")
+ 
+    # ── push to Hub on a named revision ──────────────────────────────────
+    logger.info(f"Pushing to HF Hub → {hf_repo} ")
+    model.model.push_to_hub(
+        hf_repo,
+        #revision=hf_revision,   # creates/updates a branch with this name
+        token=token,
+    )
+    processor.push_to_hub(
+        hf_repo,
+        #revision=hf_revision,
+        token=token,
+    )
+    logger.success(
+        f"Model available at "
+        f"https://huggingface.co/{hf_repo}"
+    )
+    
+
+# Save locally only (no HF push)
+def _save_local(
+    model: RTDETRLightningModule,
+    processor: RTDetrImageProcessor,
+    local_dir: str,
+):
+    """
+    Save model weights and processor config locally using save_pretrained().
+    Use this after an NC run so partition_* runs can load from the folder
+    via --nc-checkpoint-dir without needing to push to or pull from HF Hub.
+ 
+    Writes:
+        <local_dir>/config.json
+        <local_dir>/model.safetensors
+        <local_dir>/preprocessor_config.json
+    """
+    local_dir = Path(local_dir)
+    local_dir.mkdir(parents=True, exist_ok=True)
+ 
+    logger.info(f"Saving model locally → {local_dir}")
+    model.model.save_pretrained(local_dir)
+    processor.save_pretrained(local_dir)
+    logger.success(f"NC weights saved to {local_dir}  "
+                   f"(pass this path as --nc-checkpoint-dir for partition runs)")
+
 
 def main():
     args = parse_args()
@@ -636,11 +815,30 @@ def main():
     if args.partition == "partition_25":
         assert args.csvpatches is not None,   "--csvpatches is required for partition_25"
         assert Path(args.csvpatches).exists(), f"csvpatches not found: {args.csvpatches}"
-    
+    if args.partition.startswith("partition_"):
+        assert args.csvpatches is not None, "--csvpatches is required for partition_*"
+        assert Path(args.csvpatches).exists(), f"csvpatches not found: {args.csvpatches}"
     augmentation_flag = args.augment
+
+    is_finetune = args.partition != "NC"
+ 
+    if is_finetune:
+        assert args.csvpatches is not None, \
+            "--csvpatches is required for partition_* runs"
+        assert Path(args.csvpatches).exists(), \
+            f"csvpatches not found: {args.csvpatches}"
+        assert args.nc_checkpoint_dir is not None, \
+            "--nc-checkpoint-dir is required for partition_* runs " \
+            "(point it to the hf_export/ folder from your NC run)"
+        assert Path(args.nc_checkpoint_dir).exists(), \
+            f"--nc-checkpoint-dir not found: {args.nc_checkpoint_dir}"
+
     # ── unified run name: schema_partition_MMDD_HHMM ─────────────────────
     now          = datetime.datetime.now()
-    run_name     = f"{args.schema}_{args.partition}_{now.strftime('%m%d_%H%M')}"
+    if augmentation_flag:
+        run_name     = f"{args.schema}_{args.partition}_'augm_{now.strftime('%m%d_%H%M')}"
+    else:
+        run_name     = f"{args.schema}_{args.partition}_{now.strftime('%m%d_%H%M')}"
     
 
     # ── logger setup (file written to logs/<run_name>.log) ────────────────
@@ -648,22 +846,60 @@ def main():
     logger.info(f"Run name: {run_name}")
     logger.info(f"Args: {vars(args)}")
     logger.info(f"AUGMENTATION: {str(augmentation_flag)}")
+
+    ## huggingface or local path
+    if is_finetune:
+        # Load weights from the local NC export folder.
+        # RTDetrForObjectDetection.from_pretrained() accepts a local path
+        # exactly the same as a HF repo id — no code change needed in the model.
+        checkpoint = args.nc_checkpoint_dir
+        logger.info(f"Fine-tune run: loading NC weights from local dir → {checkpoint}")
+    else:
+        checkpoint = "PekingU/rtdetr_r50vd"
+        logger.info(f"NC run: loading base weights from HF Hub → {checkpoint}")
+    
     # ── load split lists from CSV ─────────────────────────────────────────
     wp_train_list, nc_train_list, test_list, val_list = return_list_from_csv(args.csvfile)
     logger.info(f"CSV loaded: {args.csvfile}")
  
     # ── resolve train images by partition ─────────────────────────────────
     match args.partition:
-        case "NC":
-            logger.info("Partition: NC — using nc_train_list")
+        case "NC" if args.schema == "NWW":
+            logger.info("Partition: NC — train on NC val and test on WP")
             train_list_images, train_list_labels, _ = mapdict_patches_filepath(
                 nc_train_list, args.patch_folder)
  
-        case "partition_25":
-            logger.info("Partition: partition_25 — loading from parquet")
+        case p if p.startswith("partition_"):
+            logger.info(f"Partition: {p} — Train on WP, val and test on WP")
+
             df = pd.read_parquet(args.csvpatches)
-            train_list_images   = df.loc[df.index == "images",   args.partition].values.tolist()
-            train_list_labels   = df.loc[df.index == "labels",   args.partition].values.tolist()
+
+            train_list_images = df.loc["images", p]
+            train_list_labels = df.loc["labels", p]
+        
+        case "NC" if args.schema =="NNN":
+            logger.info("Partition:NC - train on NC val and test on NC")
+            train_list_filepath, test_list_filepath, val_list_filepath = create_train_test_split_for_nc(
+                nc_train_list, int(get_seed_from_filepath(args.csvfile))
+            )
+            ## map to the patch filepath
+            train_list_images, train_list_labels, _ = mapdict_patches_filepath(
+                train_list_filepath, args.patch_folder
+            ) 
+
+            ## save a csv for safety
+            df_save = df = pd.DataFrame({
+                "train_seed": pd.Series(train_list_filepath),
+                "test_seed": pd.Series(test_list_filepath),
+                "val_seed": pd.Series(val_list_filepath),
+            })
+            output_folder = Path(args.csvfile).parent
+            filename_save = f"full_NC_{Path(args.csvfile).stem}.csv"
+            ott = os.path.join(output_folder, filename_save)
+            df_save.to_csv(filename_save)
+            logger.info(f"Save NNN schema with filepaths at: {ott}")
+        case _:
+            raise ValueError(f"Unknown partition: {args.partition}")
  
     assert len(train_list_images) > 0, "train_list_images is empty — check your CSV / parquet"
     assert len(train_list_labels) > 0, "train_list_labels is empty — check your CSV / parquet"
@@ -671,14 +907,32 @@ def main():
         f"Train image/label count mismatch: {len(train_list_images)} vs {len(train_list_labels)}"
     logger.success(f"Train set: {len(train_list_images)} images")
  
-    # ── test & val always come from CSV ───────────────────────────────────
-    logger.info("Mapping test patches …")
-    test_list_images, test_list_labels, _ = mapdict_patches_filepath(test_list, args.patch_folder)
+    # ── test & val always come from CSV if schema is NWW ───────────────────────────────────
+    if args.schema == "NWW":
+        logger.info("Mapping test/val patches from WP")
+        test_list_images, test_list_labels, _ = mapdict_patches_filepath(val_list,
+                                                                      args.patch_folder)
+        
+        val_list_images, val_list_labels, _ = mapdict_patches_filepath(test_list, ##invert val and test! IMPORTANT TO MATCH PRIOR DISTRIBUTION
+                                                                args.patch_folder)
+    elif args.schema == "NNN":
+        logger.info("Mapping test/val patches - ALL NC")
+        test_list_images, test_list_labels, _ = mapdict_patches_filepath(test_list_filepath, 
+                                                                         args.patch_folder
+                                                                         )
+  
+        val_list_images, val_list_labels, _ = mapdict_patches_filepath(val_list_filepath,
+                                                                        args.patch_folder
+                                                                        )
+    else:
+        raise ValueError(f"Unknown schema: {args.schema}")
+
     assert len(test_list_images) > 0, "test_list_images is empty"
- 
-    logger.info("Mapping val patches …")
-    val_list_images, val_list_labels, _ = mapdict_patches_filepath(val_list, args.patch_folder)
+    assert len(test_list_images) == len(test_list_labels)
+    logger.success(f"Test Set:{len(test_list_images)}")
     assert len(val_list_images) > 0, "val_list_images is empty"
+    assert len(val_list_images) == len(val_list_labels)
+    logger.success(f"Val set:{len(val_list_images)}")
  
     # ── train ─────────────────────────────────────────────────────────────
     trainer, model, processor = train(
@@ -687,22 +941,40 @@ def main():
         test_images=test_list_images,   test_labels=test_list_labels,
         use_augmentation = augmentation_flag,
         run_name=run_name,
+        checkpoint=checkpoint,
         id2label={0: "dugong"},
         batch_size=args.batch_size,
         max_epochs=args.max_epochs,
         lr=args.lr,
         output_dir=args.output_dir,
         wandb_project=args.wandb_project,
-        wandb_tags=[args.schema, args.partition],
-    )
+         wandb_tags=[args.schema, args.partition, "NC-pretrained" if is_finetune else "from-hub"],
+         )
  
+    ## save to hugging face
+    if not is_finetune:
+        local_hf_dir = os.path.join(args.output_dir, run_name, "hf_export")
+ 
+        if args.save_nc_local or args.hf_repo:
+            # Always save locally first (needed for HF push too)
+            _save_local(model=model, processor=processor, local_dir=local_hf_dir)
+ 
+        if args.hf_repo:
+            _save_and_push(
+                model=model,
+                processor=processor,
+                local_dir=local_hf_dir,
+                hf_repo=args.hf_repo,
+            )
+
     # ── inference on test set → JSON files ────────────────────────────────
     logger.info("Running inference on test set …")
     run_inference(
         image_filepaths=test_list_images,
         lightning_module=model,
         processor=processor,
-        confidence_threshold=0.3,
+        output_dir=os.path.join(args.output_inference,run_name),
+        confidence_threshold=0.1,
     )
 
 

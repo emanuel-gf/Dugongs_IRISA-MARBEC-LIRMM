@@ -30,7 +30,7 @@ from huggingface_hub import login as hf_login
 from dotenv import load_dotenv
 
 # LOGURU SETUP  — call once at startup; writes both to stderr and a dated file
-def setup_logger(log_dir: str = "logs", run_name: str = "run"):
+def setup_logger(log_dir: str = "logs_logger", run_name: str = "run"):
     """
     Configure loguru: coloured stderr + rotating file in log_dir.
     Returns the path of the log file so it can be passed to W&B.
@@ -171,6 +171,7 @@ class DugongDataset(Dataset):
 
     def __getitem__(self, idx):
         image = Image.open(self.list_image_filepath[idx]).convert("RGB")
+        img_w, img_h = image.size
 
         annotations = []
         label_path = self.list_label_filepath[idx]
@@ -181,10 +182,17 @@ class DugongDataset(Dataset):
                     if not parts:
                         continue
                     cls_id, xc, yc, w, h = map(float, parts)
+
+                    ## convert from YOLO to normalized COCO
+                    x_min = (xc - w / 2) * img_w
+                    y_min = (yc - h / 2) * img_h
+                    abs_w = w * img_w
+                    abs_h = h * img_h
+
                     annotations.append({
                         "category_id": int(cls_id),
-                        "bbox": [xc, yc, w, h],
-                        "area": w * h,
+                        "bbox": [x_min, y_min, abs_w, abs_h], ## COCO ABSOLUTE PIXELS
+                        "area": abs_w * abs_h,
                         "iscrowd": 0,
                     })
 
@@ -308,55 +316,105 @@ def _xyxy_to_cxcywh(boxes: torch.Tensor) -> torch.Tensor:
     return torch.stack([(x1 + x2) / 2, (y1 + y2) / 2,
                          x2 - x1,       y2 - y1], dim=-1)
 
-def xyxy_to_quadrilateral(boxes_xyxy):
-    """
-    boxes_xyxy: [B, N, 4] or [N, 4] in [x1, y1, x2, y2] format
-    Returns: [B, N, 4, 2] or [N, 4, 2] quadrilaterals
-    """
-    x1, y1, x2, y2 = boxes_xyxy.unbind(dim=-1)
-    quadrilaterals = torch.stack([
-        torch.stack([x1, y1], dim=-1),  # top-left
-        torch.stack([x2, y1], dim=-1),  # top-right
-        torch.stack([x2, y2], dim=-1),  # bottom-right
-        torch.stack([x1, y2], dim=-1),  # bottom-left
-    ], dim=-2)
-    return quadrilaterals
+# def xyxy_to_quadrilateral(boxes_xyxy):
+#     """
+#     boxes_xyxy: [B, N, 4] or [N, 4] in [x1, y1, x2, y2] format
+#     Returns: [B, N, 4, 2] or [N, 4, 2] quadrilaterals
+#     """
+#     x1, y1, x2, y2 = boxes_xyxy.unbind(dim=-1)
+#     quadrilaterals = torch.stack([
+#         torch.stack([x1, y1], dim=-1),  # top-left
+#         torch.stack([x2, y1], dim=-1),  # top-right
+#         torch.stack([x2, y2], dim=-1),  # bottom-right
+#         torch.stack([x1, y2], dim=-1),  # bottom-left
+#     ], dim=-2)
+#     return quadrilaterals
 
-def quadrilateral_to_xyxy(boxes_quad):
-    """
-    boxes_quad: [B, N, 4, 2] or [N, 4, 2] quadrilaterals
-    Returns: [B, N, 4] or [N, 4] in [x1, y1, x2, y2] format
-    """
-    x_coords, _ = boxes_quad[..., 0], boxes_quad[..., 1]
-    x1 = x_coords.min(dim=-1)[0]
-    y1 = boxes_quad[..., 1].min(dim=-1)[0]
-    x2 = x_coords.max(dim=-1)[0]
-    y2 = boxes_quad[..., 1].max(dim=-1)[0]
-    return torch.stack([x1, y1, x2, y2], dim=-1)
+# def quadrilateral_to_xyxy(boxes_quad):
+#     """
+#     boxes_quad: [B, N, 4, 2] or [N, 4, 2] quadrilaterals
+#     Returns: [B, N, 4] or [N, 4] in [x1, y1, x2, y2] format
+#     """
+#     x_coords, _ = boxes_quad[..., 0], boxes_quad[..., 1]
+#     x1 = x_coords.min(dim=-1)[0]
+#     y1 = boxes_quad[..., 1].min(dim=-1)[0]
+#     x2 = x_coords.max(dim=-1)[0]
+#     y2 = boxes_quad[..., 1].max(dim=-1)[0]
+#     return torch.stack([x1, y1, x2, y2], dim=-1)
 
+# class DugongAugmentor(nn.Module):
+#     def __init__(self):
+#         super().__init__()
+#         self.augmentations = AugmentationSequential(
+#             RandomHorizontalFlip(p=0.5),
+#             RandomVerticalFlip(p=0.5),
+#             data_keys=["input", "bbox"],
+#         )
+
+#     @torch.no_grad()
+#     def forward(self, images: torch.Tensor, boxes_xyxy: torch.Tensor):
+#         """
+#         images    : (B, 3, H, W)
+#         boxes_xyxy: (B, N, 4)  in [x1, y1, x2, y2] format
+
+#         Returns images and boxes both back in their original formats.
+#         """
+#         boxes_quad = xyxy_to_quadrilateral(boxes_xyxy)
+#         images_aug, boxes_quad_aug = self.augmentations(images, boxes_quad)
+#         boxes_xyxy_aug = quadrilateral_to_xyxy(boxes_quad_aug)
+#         return images_aug, boxes_xyxy_aug
 class DugongAugmentor(nn.Module):
     def __init__(self):
         super().__init__()
         self.augmentations = AugmentationSequential(
             RandomHorizontalFlip(p=0.5),
             RandomVerticalFlip(p=0.5),
-            data_keys=["input", "bbox"],
+            data_keys=["input", "bbox"],  # bbox expects (B, N, 4, 2) quadrilaterals
         )
 
     @torch.no_grad()
-    def forward(self, images: torch.Tensor, boxes_xyxy: torch.Tensor):
+    def forward(self, images: torch.Tensor, boxes_cxcywh: torch.Tensor):
         """
-        images    : (B, 3, H, W)
-        boxes_xyxy: (B, N, 4)  in [x1, y1, x2, y2] format
+        images      : (B, 3, H, W)
+        boxes_cxcywh: (B, N, 4) normalised [0,1] cxcywh
+        """
+        _, _, H, W = images.shape
+        scale = boxes_cxcywh.new_tensor([W, H, W, H])
 
-        Returns images and boxes both back in their original formats.
-        """
-        boxes_quad = xyxy_to_quadrilateral(boxes_xyxy)
+        # cxcywh normalised → xyxy absolute pixels
+        boxes_xyxy_abs = _cxcywh_to_xyxy(boxes_cxcywh) * scale  # (B, N, 4)
+
+        # xyxy absolute → (B, N, 4, 2) quadrilaterals — what Kornia actually needs
+        boxes_quad = self._xyxy_to_quad(boxes_xyxy_abs)          # (B, N, 4, 2)
+
         images_aug, boxes_quad_aug = self.augmentations(images, boxes_quad)
-        boxes_xyxy_aug = quadrilateral_to_xyxy(boxes_quad_aug)
-        return images_aug, boxes_xyxy_aug
 
+        # (B, N, 4, 2) → xyxy absolute → cxcywh normalised
+        boxes_xyxy_abs_aug = self._quad_to_xyxy(boxes_quad_aug)  # (B, N, 4)
+        boxes_aug = _xyxy_to_cxcywh(boxes_xyxy_abs_aug / scale).clamp(0.0, 1.0)
 
+        return images_aug, boxes_aug
+
+    @staticmethod
+    def _xyxy_to_quad(boxes_xyxy: torch.Tensor) -> torch.Tensor:
+        """(B, N, 4) xyxy → (B, N, 4, 2) quadrilateral corners: TL, TR, BR, BL"""
+        x1, y1, x2, y2 = boxes_xyxy.unbind(dim=-1)
+        return torch.stack([
+            torch.stack([x1, y1], dim=-1),  # top-left
+            torch.stack([x2, y1], dim=-1),  # top-right
+            torch.stack([x2, y2], dim=-1),  # bottom-right
+            torch.stack([x1, y2], dim=-1),  # bottom-left
+        ], dim=-2)                           # (B, N, 4, 2)
+
+    @staticmethod
+    def _quad_to_xyxy(boxes_quad: torch.Tensor) -> torch.Tensor:
+        """(B, N, 4, 2) quadrilateral → (B, N, 4) xyxy — fixed dim bug"""
+        x1 = boxes_quad[..., 0].min(dim=-1)[0]  # min x across 4 corners
+        y1 = boxes_quad[..., 1].min(dim=-1)[0]  # min y across 4 corners
+        x2 = boxes_quad[..., 0].max(dim=-1)[0]  # max x across 4 corners
+        y2 = boxes_quad[..., 1].max(dim=-1)[0]  # max y across 4 corners
+        return torch.stack([x1, y1, x2, y2], dim=-1)
+    
 # ─────────────────────────────────────────────
 # Lightning Module
 class RTDETRLightningModule(pl.LightningModule):
@@ -377,16 +435,22 @@ class RTDETRLightningModule(pl.LightningModule):
         max_epochs: int = 50,
         id2label: dict | None = None,
         use_augmentation = False,
+        early_stopping_patience: int = 10,
+         **kwargs
     ):
         super().__init__()
-        self.save_hyperparameters("lr", "weight_decay", "max_epochs")
+        self.save_hyperparameters(ignore=["id2label"])
  
         self.model = RTDetrForObjectDetection.from_pretrained(
             checkpoint)
         self.augmentor = DugongAugmentor() if use_augmentation else None
         self.id2label  = id2label or {0: "dugong"}
         self._first_batch_done = False
- 
+
+        # Assign any additional hyperparameters from kwargs
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
     # ── box padding helpers ───────────────────────────────────────────────
  
     def _pad_boxes(self, labels):
@@ -489,36 +553,59 @@ class RTDETRLightningModule(pl.LightningModule):
             logger.debug("─" * 60)
             self._first_batch_done = True
 
-        # Conditionally apply augmentation
+
         if self.augmentor and any(lbl["boxes"].shape[0] > 0 for lbl in labels):
-            padded_boxes, mask = self._pad_boxes(labels)
-            # Convert boxes to xyxy format for augmentation
-            padded_boxes_xyxy = _cxcywh_to_xyxy(padded_boxes)
-            pixel_values, aug_boxes_xyxy = self.augmentor(pixel_values, padded_boxes_xyxy)
-            # Convert back to cxcywh
-            aug_boxes = _xyxy_to_cxcywh(aug_boxes_xyxy)
+            padded_boxes, mask = self._pad_boxes(labels)          # (B, N, 4) cxcywh normalised
+            pixel_values, aug_boxes = self.augmentor(pixel_values, padded_boxes)
             self._unpad_boxes(aug_boxes, mask, labels)
 
- 
+        ## output
         outputs = self(pixel_values, labels)
-        self._log_loss_dict("train", outputs.loss, outputs.loss_dict)
-        loss    = outputs.loss
 
-        ## old
-        # self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-        # for k, v in outputs.loss_dict.items():
-        #     self.log(f"train/{k}", v, on_step=False, on_epoch=True)
+        # ── first-batch prediction debug ──────────────────────────────────
+        if not self._first_batch_done:
+            logger.debug("─" * 60)
+            logger.debug("First batch RAW PREDICTIONS (before post-processing)")
+
+            # ── only peek at 2 images, move immediately to CPU to avoid OOM ──
+            n_debug = min(2, len(labels))
+            logits_cpu    = outputs.logits[:n_debug].detach().float().cpu()   # float() in case of fp16
+            pred_boxes_cpu = outputs.pred_boxes[:n_debug].detach().float().cpu()
+
+            scores     = logits_cpu.sigmoid()                  # (n_debug, num_queries, num_classes)
+            top_scores, top_classes = scores.max(dim=-1)       # (n_debug, num_queries)
+
+            for i in range(n_debug):
+                topk_scores, topk_idx = top_scores[i].topk(min(5, top_scores[i].shape[0]))
+                topk_boxes   = pred_boxes_cpu[i][topk_idx]
+                topk_classes = top_classes[i][topk_idx]
+
+                logger.debug(f"  img[{i}] — top-5 queries:")
+                for rank, (sc, cls, box) in enumerate(
+                        zip(topk_scores.tolist(), topk_classes.tolist(), topk_boxes.tolist())):
+                    logger.debug(f"    [{rank}] score={sc:.4f}  class={cls}  "
+                                f"box(cxcywh)=[{box[0]:.3f}, {box[1]:.3f}, "
+                                f"{box[2]:.3f}, {box[3]:.3f}]")
+
+            flat_scores = top_scores.flatten()
+            logger.debug(f"  Score stats (first {n_debug} imgs): "
+                        f"min={flat_scores.min():.4f}  max={flat_scores.max():.4f}  "
+                        f"mean={flat_scores.mean():.4f}  median={flat_scores.median():.4f}")
+            logger.debug(f"  Queries > 0.3 : {(flat_scores > 0.3).sum()} / {flat_scores.numel()}")
+            logger.debug(f"  Queries > 0.1 : {(flat_scores > 0.1).sum()} / {flat_scores.numel()}")
+            logger.debug("─" * 60)
+
+            self._first_batch_done = True
+
+        self._log_loss_dict("train", outputs.loss, outputs.loss_dict)
+        return outputs.loss
  
-        return loss
  
     # ── validation ───────────────────────────────────────────────────────
  
     def validation_step(self, batch, batch_idx):
         loss, loss_dict = self._eval_step(batch)
         self._log_loss_dict("val", loss, loss_dict)
-        # self.log("val/loss", loss, on_epoch=True, prog_bar=True)
-        # for k, v in loss_dict.items():
-        #     self.log(f"val/{k}", v, on_epoch=True)
         return loss
  
     # ── test ─────────────────────────────────────────────────────────────
@@ -535,10 +622,14 @@ class RTDETRLightningModule(pl.LightningModule):
  
     def configure_optimizers(self):
         optimizer = AdamW(self.model.parameters(),
-                          lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
+                        lr=self.hparams.lr,
+                        weight_decay=self.hparams.weight_decay)
+
         scheduler = CosineAnnealingLR(optimizer, T_max=self.hparams.max_epochs)
-        return {"optimizer": optimizer,
-                "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"}}
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"},
+        }
  
  
 
@@ -606,11 +697,12 @@ def train(
     batch_size: int     = 8,
     max_epochs: int     = 50,
     lr: float           = 1e-4,
-    weight_decay: float = 1e-4,
+    weight_decay: float = 1e-3,
     output_dir: str     = "checkpoints",
-    early_stop_patience: int = 10,
+    early_stopping_patience: int = 10,
     wandb_project: str  = "rtdetr-dugong",
     wandb_tags: list    = None,
+    **kwargs
 ):
     id2label  = id2label or {0: "dugong"}
     ckpt_dir  = os.path.join(output_dir, run_name)   # checkpoints/schema_partition_timestamp/
@@ -624,7 +716,8 @@ def train(
     lit_model = RTDETRLightningModule(
         checkpoint=checkpoint, 
         lr=lr, weight_decay=weight_decay,
-        max_epochs=max_epochs, id2label=id2label, use_augmentation=use_augmentation
+        max_epochs=max_epochs, id2label=id2label, use_augmentation=use_augmentation,
+        **kwargs
         )
     logger.success("Lightning module instantiated")
  
@@ -652,7 +745,8 @@ def train(
         tags=wandb_tags or [],
         log_model=False,
         config=dict(checkpoint=checkpoint, lr=lr, weight_decay=weight_decay,
-                    batch_size=batch_size, max_epochs=max_epochs, id2label=id2label),
+                    batch_size=batch_size, max_epochs=max_epochs,
+                      id2label=id2label, early_stopping_patience=early_stopping_patience),
     )
     logger.info(f"W&B run: project='{wandb_project}'  name='{run_name}'")
  
@@ -664,7 +758,9 @@ def train(
         logger=wandb_logger,
         callbacks=[
             ckpt_callback,
-            EarlyStopping(monitor="val/loss", patience=early_stop_patience, mode="min"),
+            EarlyStopping(monitor="val/loss",
+                        patience=early_stopping_patience,
+                        mode="min"),
             LearningRateMonitor(logging_interval="epoch"),
         ],
         log_every_n_steps=100,
@@ -673,7 +769,8 @@ def train(
     )
  
     logger.info("Starting training …")
-    trainer.fit(lit_model, datamodule=data_module)
+    trainer.fit(lit_model,
+                 datamodule=data_module)
     logger.success("Training complete")
  
     #logger.info("Evaluating best checkpoint on held-out test set …")
@@ -707,6 +804,7 @@ def parse_args():
                         help="folder to store the inferences")
     parser.add_argument("--batch-size",   type=int, default=8)
     parser.add_argument("--max-epochs",   type=int, default=50)
+    parser.add_argument("--early-stopping", type=int, default=10, help="Patience for early stopping", dest="early_stopping_patience")
     parser.add_argument("--lr",           type=float, default=1e-4)
     parser.add_argument("--wandb-project",type=str, default="rtdetr-dugong")
     parser.add_argument("--augment", action="store_true", default=False,
@@ -847,7 +945,7 @@ def main():
     
 
     # ── logger setup (file written to logs/<run_name>.log) ────────────────
-    setup_logger(log_dir="logs", run_name=run_name)
+    setup_logger(run_name=run_name)
     logger.info(f"Run name: {run_name}")
     logger.info(f"Args: {vars(args)}")
     logger.info(f"AUGMENTATION: {str(augmentation_flag)}")
@@ -954,6 +1052,7 @@ def main():
         output_dir=args.output_dir,
         wandb_project=args.wandb_project,
          wandb_tags=[args.schema, args.partition, "NC-pretrained" if is_finetune else "from-hub"],
+         early_stopping_patience= args.early_stopping_patience
          )
  
     ## save to hugging face
@@ -978,7 +1077,7 @@ def main():
         image_filepaths=test_list_images,
         lightning_module=model,
         processor=processor,
-        output_dir=os.path.join(args.output_inference,run_name),
+        output_dir=Path(os.path.join(args.output_inference,run_name)),
         confidence_threshold=0.1,
     )
 

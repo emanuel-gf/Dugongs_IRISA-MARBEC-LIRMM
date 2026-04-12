@@ -9,7 +9,7 @@ import json
 import os
 import sys
 from pathlib import Path
- 
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -616,10 +616,10 @@ def train(
     ckpt_dir  = os.path.join(output_dir, run_name)   # checkpoints/schema_partition_timestamp/
  
     logger.info(f"Run: {run_name}")
-    logger.info(f"Checkpoint dir: {ckpt_dir}")
+    logger.info(f"NEW Checkpoint dir: {ckpt_dir}")
  
     processor = RTDetrImageProcessor.from_pretrained(checkpoint)
-    logger.success(f"Processor loaded from '{checkpoint}'")
+    logger.success(f"Processor LOADED from '{checkpoint}'")
  
     lit_model = RTDETRLightningModule(
         checkpoint=checkpoint, 
@@ -722,6 +722,10 @@ def parse_args():
                         help="Local directory containing NC weights saved with save_pretrained() "
                              "(e.g. checkpoints/schema_NC_MMDD_HHMM/hf_export). "
                              "Required for partition_* runs.")
+    parser.add_argument("--save-nc-local", action="store_true", default=False,
+                        help="After NC training, save weights locally to "
+                             "<output-dir>/<run-name>/hf_export/ "
+                             "(use the printed path as --nc-checkpoint-dir for partition runs)")
     return parser.parse_args()
 
 
@@ -834,11 +838,12 @@ def main():
             f"--nc-checkpoint-dir not found: {args.nc_checkpoint_dir}"
 
     # ── unified run name: schema_partition_MMDD_HHMM ─────────────────────
-    now          = datetime.datetime.now()
+    now = datetime.datetime.now()
+    seed_number = get_seed_from_filepath(args.csvfile)
     if augmentation_flag:
-        run_name     = f"{args.schema}_{args.partition}_'augm_{now.strftime('%m%d_%H%M')}"
+        run_name     = f"{args.schema}_{args.partition}_SEED{seed_number}_augm_{now.strftime('%m%d_%H%M')}"
     else:
-        run_name     = f"{args.schema}_{args.partition}_{now.strftime('%m%d_%H%M')}"
+        run_name     = f"{args.schema}_{args.partition}_SEED{seed_number}_{now.strftime('%m%d_%H%M')}"
     
 
     # ── logger setup (file written to logs/<run_name>.log) ────────────────
@@ -880,7 +885,7 @@ def main():
         case "NC" if args.schema =="NNN":
             logger.info("Partition:NC - train on NC val and test on NC")
             train_list_filepath, test_list_filepath, val_list_filepath = create_train_test_split_for_nc(
-                nc_train_list, int(get_seed_from_filepath(args.csvfile))
+                np.array(nc_train_list), int(get_seed_from_filepath(args.csvfile))
             )
             ## map to the patch filepath
             train_list_images, train_list_labels, _ = mapdict_patches_filepath(
@@ -907,7 +912,7 @@ def main():
         f"Train image/label count mismatch: {len(train_list_images)} vs {len(train_list_labels)}"
     logger.success(f"Train set: {len(train_list_images)} images")
  
-    # ── test & val always come from CSV if schema is NWW ───────────────────────────────────
+    # ── test & val ───────────────────────────────────
     if args.schema == "NWW":
         logger.info("Mapping test/val patches from WP")
         test_list_images, test_list_labels, _ = mapdict_patches_filepath(val_list,

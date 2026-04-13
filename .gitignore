@@ -5,3 +5,10 @@ __pycache__/
 *.png
 *.csv
 *drafts_file/
+wandb/
+logs/
+inference_files/
+output_inference/
+checkpoints/
+NNN_*
+NWW_*

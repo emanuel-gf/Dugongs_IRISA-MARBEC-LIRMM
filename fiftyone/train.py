@@ -17,7 +17,7 @@ import pytorch_lightning as pl
 import kornia.augmentation as K
 from loguru import logger
 from kornia.augmentation import AugmentationSequential, RandomHorizontalFlip, RandomVerticalFlip, RandomAffine
-
+from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
@@ -316,53 +316,7 @@ def _xyxy_to_cxcywh(boxes: torch.Tensor) -> torch.Tensor:
     return torch.stack([(x1 + x2) / 2, (y1 + y2) / 2,
                          x2 - x1,       y2 - y1], dim=-1)
 
-# def xyxy_to_quadrilateral(boxes_xyxy):
-#     """
-#     boxes_xyxy: [B, N, 4] or [N, 4] in [x1, y1, x2, y2] format
-#     Returns: [B, N, 4, 2] or [N, 4, 2] quadrilaterals
-#     """
-#     x1, y1, x2, y2 = boxes_xyxy.unbind(dim=-1)
-#     quadrilaterals = torch.stack([
-#         torch.stack([x1, y1], dim=-1),  # top-left
-#         torch.stack([x2, y1], dim=-1),  # top-right
-#         torch.stack([x2, y2], dim=-1),  # bottom-right
-#         torch.stack([x1, y2], dim=-1),  # bottom-left
-#     ], dim=-2)
-#     return quadrilaterals
 
-# def quadrilateral_to_xyxy(boxes_quad):
-#     """
-#     boxes_quad: [B, N, 4, 2] or [N, 4, 2] quadrilaterals
-#     Returns: [B, N, 4] or [N, 4] in [x1, y1, x2, y2] format
-#     """
-#     x_coords, _ = boxes_quad[..., 0], boxes_quad[..., 1]
-#     x1 = x_coords.min(dim=-1)[0]
-#     y1 = boxes_quad[..., 1].min(dim=-1)[0]
-#     x2 = x_coords.max(dim=-1)[0]
-#     y2 = boxes_quad[..., 1].max(dim=-1)[0]
-#     return torch.stack([x1, y1, x2, y2], dim=-1)
-
-# class DugongAugmentor(nn.Module):
-#     def __init__(self):
-#         super().__init__()
-#         self.augmentations = AugmentationSequential(
-#             RandomHorizontalFlip(p=0.5),
-#             RandomVerticalFlip(p=0.5),
-#             data_keys=["input", "bbox"],
-#         )
-
-#     @torch.no_grad()
-#     def forward(self, images: torch.Tensor, boxes_xyxy: torch.Tensor):
-#         """
-#         images    : (B, 3, H, W)
-#         boxes_xyxy: (B, N, 4)  in [x1, y1, x2, y2] format
-
-#         Returns images and boxes both back in their original formats.
-#         """
-#         boxes_quad = xyxy_to_quadrilateral(boxes_xyxy)
-#         images_aug, boxes_quad_aug = self.augmentations(images, boxes_quad)
-#         boxes_xyxy_aug = quadrilateral_to_xyxy(boxes_quad_aug)
-#         return images_aug, boxes_xyxy_aug
 class DugongAugmentor(nn.Module):
     def __init__(self):
         super().__init__()
@@ -436,6 +390,7 @@ class RTDETRLightningModule(pl.LightningModule):
         id2label: dict | None = None,
         use_augmentation = False,
         early_stopping_patience: int = 10,
+        confidence_threshold = 0.3,
          **kwargs
     ):
         super().__init__()
@@ -446,11 +401,15 @@ class RTDETRLightningModule(pl.LightningModule):
         self.augmentor = DugongAugmentor() if use_augmentation else None
         self.id2label  = id2label or {0: "dugong"}
         self._first_batch_done = False
-
+        self.confidence_threshold = confidence_threshold
         # Assign any additional hyperparameters from kwargs
         for key, value in kwargs.items():
             setattr(self, key, value)
 
+        ##MaP
+        # one metric object per split — they accumulate across batches
+        self.val_map  = MeanAveragePrecision(iou_type="bbox", box_format="xyxy")
+        self.test_map = MeanAveragePrecision(iou_type="bbox", box_format="xyxy")
     # ── box padding helpers ───────────────────────────────────────────────
  
     def _pad_boxes(self, labels):
@@ -477,8 +436,61 @@ class RTDETRLightningModule(pl.LightningModule):
         pixel_values = batch["pixel_values"]
         labels       = self._move_labels_to_device(batch["labels"])
         outputs      = self(pixel_values, labels)
-        return outputs.loss, outputs.loss_dict
- 
+        ## return outputs.loss, outputs.loss_dict
+        return outputs, labels
+    
+    def _collect_map_inputs(self, outputs, labels, confidence_threshold
+                            ):
+        """
+        Convert raw RT-DETR outputs + ground-truth labels into the
+        list-of-dicts format that torchmetrics MeanAveragePrecision expects.
+
+        torchmetrics preds format (one dict per image):
+            boxes  : (M, 4) xyxy  absolute pixels  — FloatTensor
+            scores : (M,)                           — FloatTensor
+            labels : (M,)                           — IntTensor
+
+        torchmetrics targets format (one dict per image):
+            boxes  : (N, 4) xyxy  absolute pixels  — FloatTensor
+            labels : (N,)                           — IntTensor
+        """
+        # logits: (B, num_queries, num_classes)
+        # pred_boxes: (B, num_queries, 4) cxcywh normalised
+        scores_all = outputs.logits.sigmoid()           # (B, Q, C)
+        boxes_all  = outputs.pred_boxes                 # (B, Q, 4) cxcywh norm
+
+        preds   = []
+        targets = []
+
+        for i, lbl in enumerate(labels):
+            # ── image size from label (stored by processor as [h, w]) ──
+            h, w = lbl["orig_size"].tolist()
+
+            # ── predictions ──────────────────────────────────────────
+            scores_i, classes_i = scores_all[i].max(dim=-1)   # (Q,), (Q,)
+            keep = scores_i > confidence_threshold
+
+            boxes_norm  = boxes_all[i][keep]                   # (M, 4) cxcywh norm
+            boxes_xyxy  = _cxcywh_to_xyxy(boxes_norm)          # (M, 4) xyxy norm
+            scale       = boxes_norm.new_tensor([w, h, w, h])
+            boxes_abs   = (boxes_xyxy * scale).clamp(0)        # (M, 4) xyxy abs pixels
+
+            preds.append({
+                "boxes":  boxes_abs.cpu(),
+                "scores": scores_i[keep].cpu(),
+                "labels": classes_i[keep].int().cpu(),
+            })
+
+            # ── ground truth ─────────────────────────────────────────
+            gt_boxes_norm = lbl["boxes"]                        # (N, 4) cxcywh norm
+            gt_boxes_abs  = (_cxcywh_to_xyxy(gt_boxes_norm) * scale).clamp(0)
+
+            targets.append({
+                "boxes":  gt_boxes_abs.cpu(),
+                "labels": lbl["class_labels"].int().cpu(),
+            })
+
+        return preds, targets
     # ── forward ──────────────────────────────────────────────────────────
  
     def forward(self, pixel_values, labels=None):
@@ -602,22 +614,76 @@ class RTDETRLightningModule(pl.LightningModule):
  
  
     # ── validation ───────────────────────────────────────────────────────
+## OLD BEFORE IMPLEMENTEING MAP 
+    # def validation_step(self, batch, batch_idx):
+    #     loss, loss_dict = self._eval_step(batch)
+    #     self._log_loss_dict("val", loss, loss_dict)
+    #     return loss
  
+    # # ── test ─────────────────────────────────────────────────────────────
+ 
+    # def test_step(self, batch, batch_idx):
+    #     loss, loss_dict = self._eval_step(batch)
+    #     self._log_loss_dict("test", loss, loss_dict)
+        
+    #     return loss
     def validation_step(self, batch, batch_idx):
-        loss, loss_dict = self._eval_step(batch)
-        self._log_loss_dict("val", loss, loss_dict)
-        return loss
- 
-    # ── test ─────────────────────────────────────────────────────────────
- 
+        outputs, labels = self._eval_step(batch)
+        self._log_loss_dict("val", outputs.loss, outputs.loss_dict)
+
+        # accumulate mAP inputs — detached, on CPU inside _collect_map_inputs
+        with torch.no_grad():
+            preds, targets = self._collect_map_inputs(
+                outputs, labels, self.confidence_threshold
+            )
+        self.val_map.update(preds, targets)
+
+        return outputs.loss
+
+    def on_validation_epoch_end(self):
+        map_result = self.val_map.compute()
+
+        self.log("val/mAP",    map_result["map"],    prog_bar=True, sync_dist=False)
+        self.log("val/mAP_50", map_result["map_50"], prog_bar=True, sync_dist=False)
+        self.log("val/mAP_75", map_result["map_75"],               sync_dist=False)
+
+        logger.info(
+            f"Epoch {self.current_epoch} — "
+            f"val/mAP={map_result['map']:.4f}  "
+            f"val/mAP_50={map_result['map_50']:.4f}  "
+            f"val/mAP_75={map_result['map_75']:.4f}"
+        )
+        self.val_map.reset()   # ← must reset after every epoch
+
+# ── test ─────────────────────────────────────────────────────────────
+
     def test_step(self, batch, batch_idx):
-        loss, loss_dict = self._eval_step(batch)
-        self._log_loss_dict("test", loss, loss_dict)
-        # self.log("test/loss", loss, on_epoch=True, prog_bar=True)
-        # for k, v in loss_dict.items():
-        #     self.log(f"test/{k}", v, on_epoch=True)
-        return loss
- 
+        outputs, labels = self._eval_step(batch)
+        self._log_loss_dict("test", outputs.loss, outputs.loss_dict)
+
+        with torch.no_grad():
+            preds, targets = self._collect_map_inputs(
+                outputs, labels, self.confidence_threshold
+            )
+        self.test_map.update(preds, targets)
+
+        return outputs.loss
+
+    def on_test_epoch_end(self):
+        map_result = self.test_map.compute()
+
+        self.log("test/mAP",    map_result["map"],    sync_dist=False)
+        self.log("test/mAP_50", map_result["map_50"], sync_dist=False)
+        self.log("test/mAP_75", map_result["map_75"], sync_dist=False)
+
+        logger.info(
+            f"Test — "
+            f"mAP={map_result['map']:.4f}  "
+            f"mAP_50={map_result['map_50']:.4f}  "
+            f"mAP_75={map_result['map_75']:.4f}"
+        )
+        self.test_map.reset()
+
     # ── optimizer ────────────────────────────────────────────────────────
  
     def configure_optimizers(self):
@@ -731,9 +797,9 @@ def train(
  
     ckpt_callback = ModelCheckpoint(
         dirpath=ckpt_dir,
-        filename=f"{run_name}-{{epoch:02d}}-{{val/loss:.4f}}",
-        monitor="val/loss",
-        mode="min",
+        filename=f"{run_name}-{{epoch:02d}}-{{val/mAP_50:.4f}}",
+        monitor="val/mAP_50",   # ← best detector, not best loss
+        mode="max",             # ← higher is better
         save_top_k=3,
         save_last=False,
         #every_n_epochs=10,

@@ -701,6 +701,38 @@ class RTDETRLightningModule(pl.LightningModule):
 
 # 5.  FIFTYONE INFERENCE HELPER
 # ─────────────────────────────────────────────────────────────────────────────
+def get_tile_metadata(filename: str, img_w: int, img_h: int, tile_size: int = 640, overlap: int = 100):
+    """
+    Recompute the actual tile start and size from the filename and image dimensions.
+    """
+    import re
+    # Extract stride-based offsets from filename
+    match = re.search(r"__tile_(\d+)_(\d+)", filename)
+    if not match:
+        return None  # Not a tiled image
+
+    y_stride = int(match.group(1))
+    x_stride = int(match.group(2))
+
+    stride = tile_size - overlap
+
+    # Recompute actual tile start and end
+    x_end = min(x_stride + tile_size, img_w)
+    y_end = min(y_stride + tile_size, img_h)
+
+    x_start = x_end - tile_size if x_end - tile_size >= 0 else 0
+    y_start = y_end - tile_size if y_end - tile_size >= 0 else 0
+
+    tile_w = x_end - x_start
+    tile_h = y_end - y_start
+
+    return {
+        "x_start": x_start,
+        "y_start": y_start,
+        "tile_w": tile_w,
+        "tile_h": tile_h,
+    }
+
 @torch.no_grad()
 def run_inference(
     image_filepaths: list,
@@ -709,6 +741,8 @@ def run_inference(
     confidence_threshold: float = 0.3,
     output_dir: str | Path | None = None,
     device: str | torch.device | None = None,
+    tile_size: int = 640,  # Default tile size
+    overlap: int = 100,    # Default overlap
 ) -> list[dict]:
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -738,8 +772,16 @@ def run_inference(
                 "bounding_box": [x1/w_img, y1/h_img, (x2-x1)/w_img, (y2-y1)/h_img],
                 "confidence":   round(score.item(), 6),
             })
+
+        # --- Extract tile metadata ---
+        tile_metadata = get_tile_metadata(
+            str(path), w_img, h_img, tile_size=tile_size, overlap=overlap
+        )
  
         record = {"filepath": str(path.resolve()), "detections": detections}
+
+        if tile_metadata:
+            record["tile_metadata"] = tile_metadata
         results.append(record)
  
         json_path = (Path(output_dir) / path.name if output_dir else path).with_suffix(".json")
@@ -1137,7 +1179,7 @@ def main():
                 hf_repo=args.hf_repo,
             )
 
-    # ── inference on test set → JSON files ────────────────────────────────
+    # ── inferensce on test set → JSON files ────────────────────────────────
     logger.info("Running inference on test set …")
     run_inference(
         image_filepaths=test_list_images,
@@ -1145,6 +1187,8 @@ def main():
         processor=processor,
         output_dir=Path(os.path.join(args.output_inference,run_name)),
         confidence_threshold=0.1,
+        tile_size=640,  # Match tiling parameters
+        overlap=100,
     )
 
 

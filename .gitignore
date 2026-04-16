@@ -12,3 +12,4 @@ output_inference/
 checkpoints/
 NNN_*
 NWW_*
+*.sh

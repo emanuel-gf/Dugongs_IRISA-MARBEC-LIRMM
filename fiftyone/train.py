@@ -814,7 +814,8 @@ def train(
 ):
     id2label  = id2label or {0: "dugong"}
     ckpt_dir  = os.path.join(output_dir, run_name)   # checkpoints/schema_partition_timestamp/
- 
+    os.makedirs(output_dir, exist_ok=True)
+    
     logger.info(f"Run: {run_name}")
     logger.info(f"NEW Checkpoint dir: {ckpt_dir}")
  

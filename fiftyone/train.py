@@ -48,6 +48,7 @@ def setup_logger(log_dir: str = "logs_logger", run_name: str = "run"):
     logger.info(f"Logger initialised → {log_file}")
     return log_file
 
+
 def check_hf_auth():
     """Validates Hugging Face token from environment variables."""
     hf_token = os.getenv("HUGGING_FACE_API")
@@ -61,6 +62,7 @@ def check_hf_auth():
     except Exception as e:
         logger.error(f"Hugging Face login failed: {e}")
         sys.exit(1)
+
 
 def check_wandb_auth():
     """Validates Weights & Biases API key from environment variables."""
@@ -79,18 +81,23 @@ def check_wandb_auth():
         logger.error(f"Weights & Biases error: {e}")
         sys.exit(1)
 
+
 ### HELPERs -------------------------
 def get_seed_from_filepath(csv_file):
     path = Path(csv_file).stem
     return path.split('_')[-1]
 
+
 def return_list_from_csv(csv_file):
     dff = pd.read_csv(csv_file)
-    wp_train_list = dff['train_seed'].dropna().values
-    test_list = dff['test_seed'].dropna().values
-    val_list = dff['val_seed'].dropna().values
+    wp_train_list = dff['train_wp'].dropna().values
+    wp_test_list = dff['test_wp'].dropna().values
+    wp_val_list = dff['val_wp'].dropna().values
     nc_train_list = dff['train_nc'].dropna().values
-    return wp_train_list, nc_train_list, test_list, val_list
+    nc_test_list =dff['test_nc'].dropna().values 
+    nc_val_list = dff['val_nc'].dropna().values
+    return wp_train_list, wp_test_list, wp_val_list, nc_train_list, nc_test_list, nc_val_list
+
 
 def get_files_by_stem(filepath_stem, patch_folder):
     dict_out = {}
@@ -104,6 +111,7 @@ def get_files_by_stem(filepath_stem, patch_folder):
     dict_out['label'] = list_labels
     dict_out['images'] = list_images
     return dict_out
+
 
 ## use the map dict to create the final list of filepaths regarding the patches 
 def mapdict_patches_filepath(list_paths, patch_folder):
@@ -124,41 +132,9 @@ def mapdict_patches_filepath(list_paths, patch_folder):
 
     return filepath_all_images, filepath_all_labels, filepath_all_metadata
 
-def create_train_test_split_for_nc(nc_train_list, seed_number:int):
-    """
-    split the NC dataset filepaths in train, test and val for train the model and test on NC region. 
-    Args:
-        
-    """
-    from sklearn.model_selection import train_test_split
-    train_size = 0.7
-    test_size = 0.2
-    val_size = 0.1
-    seed_number = int(seed_number)
-    assert type(seed_number)==int
 
-    # Split off the TEST set (20%) ---
-    # Stratify ensures the 'high complexity' ratio stays the same
-    train_val_ids, test_ids = train_test_split(
-        nc_train_list, 
-        test_size= test_size, 
-        shuffle=True, 
-        random_state=seed_number
-    )
-
-
-    # Split remaining 80% into Train (70% total) and Val (10% total) ---
-    # 0.125 * 0.8 = 0.1 (which is 10% of the original total)
-    train_ids, val_ids = train_test_split(
-        train_val_ids, 
-        test_size= (val_size/(1-test_size)),
-        random_state=seed_number
-    )
-    return train_ids, test_ids, val_ids
-    
 # ─────────────────────────────────────────────
-# Dataset
-
+# Dataset TORCH
 class DugongDataset(Dataset):
     def __init__(self, list_image_filepath, list_label_filepath, processor):
         self.list_image_filepath = sorted(list_image_filepath)
@@ -892,28 +868,34 @@ def train(
 # ─────────────────────────────────────────────
 # 7. Main
 # ─────────────────────────────────────────────
-PARTITIONS = ["NC", "partition_5", "partition_10", "partition_25",
-              "partition_50", "partition_75", "partition_100"]
+PARTITIONS = ['NC','partition_5', 'partition_10', 'partition_25', 'partition_50',
+                'partition_75', 'partition_100', 'ACLR_partition_5',
+                'ACLR_partition_10', 'ACLR_partition_25', 'ACLR_partition_50'
+                ]
  
 def parse_args():
     parser = argparse.ArgumentParser(description="Train RT-DETR on dugong patches")
-    parser.add_argument("--schema",       type=str, required=True,
-                        help="Experiment schema label (e.g. 'v1', 'ablation')")
-    parser.add_argument("--partition",    type=str, required=True, choices=PARTITIONS,
+    parser.add_argument('--schema', type=str, required=True)
+    parser.add_argument("--partition",    type=str,
+                         required=True, choices=PARTITIONS,
                         help="Training partition strategy")
     parser.add_argument("--csvfile",      type=str, required=True,
-                        help="CSV with train_seed / test_seed / val_seed / train_nc columns")
+                        help="FULL PATH - CSV with train_nc / test_nc / val_nc / train_wp, test_wp, val_wp in columns")
     parser.add_argument("--csvpatches",   type=str, default=None,
-                        help="Parquet file with pre-split patch filepaths (required for partition_25)")
-    parser.add_argument("--patch-folder", type=str,
+                        help="Parquet file with pre-split patch filepaths (required for partition)")
+    parser.add_argument("--patch-folder", type=str, 
                         default="/share/home/e2406743/dataset/exported_img/seed_42",
-                        help="Root folder containing images/, labels/, metadata/ subfolders")
+                        help="Root folder containing images/, labels/, metadata/ subfolders"
+                        )
     parser.add_argument("--output-dir",   type=str, default="checkpoints")
     parser.add_argument("--output-inference",   type=str, default="inference", 
                         help="folder to store the inferences")
     parser.add_argument("--batch-size",   type=int, default=8)
     parser.add_argument("--max-epochs",   type=int, default=50)
-    parser.add_argument("--early-stopping", type=int, default=10, help="Patience for early stopping", dest="early_stopping_patience")
+    parser.add_argument("--early-stopping", type=int, default=10, 
+                        help="Patience for early stopping", 
+                        dest="early_stopping_patience"
+                        )
     parser.add_argument("--lr",           type=float, default=1e-4)
     parser.add_argument("--wandb-project",type=str, default="rtdetr-dugong")
     parser.add_argument("--augment", action="store_true", default=False,
@@ -1023,15 +1005,13 @@ def main():
     # ── validate args ─────────────────────────────────────────────────────
     assert Path(args.csvfile).exists(),       f"csvfile not found: {args.csvfile}"
     assert Path(args.patch_folder).exists(),  f"patch-folder not found: {args.patch_folder}"
-    if args.partition == "partition_25":
-        assert args.csvpatches is not None,   "--csvpatches is required for partition_25"
+    if args.partition != 'NC':
+        assert args.csvpatches is not None,   "--csvpatches is required for partition run."
         assert Path(args.csvpatches).exists(), f"csvpatches not found: {args.csvpatches}"
-    if args.partition.startswith("partition_"):
-        assert args.csvpatches is not None, "--csvpatches is required for partition_*"
-        assert Path(args.csvpatches).exists(), f"csvpatches not found: {args.csvpatches}"
+
     augmentation_flag = args.augment
 
-    is_finetune = args.partition != "NC"
+    is_finetune = args.partition != 'NC'
  
     if is_finetune:
         assert args.csvpatches is not None, \
@@ -1054,10 +1034,12 @@ def main():
     
 
     # ── logger setup (file written to logs/<run_name>.log) ────────────────
-    setup_logger(run_name=run_name)
+    setup_logger(log_dir='/share/home/e2406743/code/Dugongs_IRISA-MARBEC-LIRMM/logs_logger/',
+                    run_name=run_name
+                    )
     logger.info(f"Run name: {run_name}")
     logger.info(f"Args: {vars(args)}")
-    logger.info(f"AUGMENTATION: {str(augmentation_flag)}")
+    logger.warning(f"AUGMENTATION: {str(augmentation_flag)}")
 
     ## huggingface or local path
     if is_finetune:
@@ -1065,51 +1047,40 @@ def main():
         # RTDetrForObjectDetection.from_pretrained() accepts a local path
         # exactly the same as a HF repo id — no code change needed in the model.
         checkpoint = args.nc_checkpoint_dir
-        logger.info(f"Fine-tune run: loading NC weights from local dir → {checkpoint}")
+        logger.success(f"Fine-tune run: loading NC weights from local dir → {checkpoint}")
     else:
         checkpoint = "PekingU/rtdetr_r50vd"
-        logger.info(f"NC run: loading base weights from HF Hub → {checkpoint}")
+        logger.success(f"NC run: loading base weights from HF Hub → {checkpoint}")
     
     # ── load split lists from CSV ─────────────────────────────────────────
-    wp_train_list, nc_train_list, test_list, val_list = return_list_from_csv(args.csvfile)
+    (wp_train_list, wp_test_list, wp_val_list, 
+         nc_train_list, nc_test_list, nc_val_list) = return_list_from_csv(args.csvfile)
     logger.info(f"CSV loaded: {args.csvfile}")
  
     # ── resolve train images by partition ─────────────────────────────────
     match args.partition:
-        case "NC" if args.schema == "NWW":
-            logger.info("Partition: NC — train on NC val and test on WP")
-            train_list_images, train_list_labels, _ = mapdict_patches_filepath(
-                nc_train_list, args.patch_folder)
- 
-        case p if p.startswith("partition_"):
-            logger.info(f"Partition: {p} — Train on WP, val and test on WP")
+        case p if p.startswith("ACLR_"):
+            logger.info(f"ACTIVE LEARNING - Partition:{p}")
 
             df = pd.read_parquet(args.csvpatches)
+            train_list_images = df.loc["images", p]
+            train_list_labels = df.loc["labels", p]
+ 
+        case p if p.startswith("partition_"):
+            logger.info(f"RANDOM SELECTION - Partition: {p}")
 
+            df = pd.read_parquet(args.csvpatches)
             train_list_images = df.loc["images", p]
             train_list_labels = df.loc["labels", p]
         
-        case "NC" if args.schema =="NNN":
+        case "NC":
             logger.info("Partition:NC - train on NC val and test on NC")
-            train_list_filepath, test_list_filepath, val_list_filepath = create_train_test_split_for_nc(
-                np.array(nc_train_list), int(get_seed_from_filepath(args.csvfile))
-            )
+            logger.info(f"Training the model to be saved on checkpoint.")
+
             ## map to the patch filepath
             train_list_images, train_list_labels, _ = mapdict_patches_filepath(
-                train_list_filepath, args.patch_folder
+                nc_train_list, args.patch_folder
             ) 
-
-            ## save a csv for safety
-            df_save = df = pd.DataFrame({
-                "train_seed": pd.Series(train_list_filepath),
-                "test_seed": pd.Series(test_list_filepath),
-                "val_seed": pd.Series(val_list_filepath),
-            })
-            output_folder = Path(args.csvfile).parent
-            filename_save = f"full_NC_{Path(args.csvfile).stem}.csv"
-            ott = os.path.join(output_folder, filename_save)
-            df_save.to_csv(filename_save)
-            logger.info(f"Save NNN schema with filepaths at: {ott}")
         case _:
             raise ValueError(f"Unknown partition: {args.partition}")
  
@@ -1120,24 +1091,25 @@ def main():
     logger.success(f"Train set: {len(train_list_images)} images")
  
     # ── test & val ───────────────────────────────────
-    if args.schema == "NWW":
-        logger.info("Mapping test/val patches from WP")
-        test_list_images, test_list_labels, _ = mapdict_patches_filepath(val_list,
-                                                                      args.patch_folder)
+    match args.schema:
+        case "NNN":
+            test_list_images, test_list_labels, _ = mapdict_patches_filepath(
+                nc_test_list, args.patch_folder
+            )
+            val_list_images, val_list_labels, _ = mapdict_patches_filepath(
+                nc_val_list, args.patch_folder
+            )
+        case "NWW":
+            test_list_images, test_list_labels, _ = mapdict_patches_filepath(
+                wp_test_list,args.patch_folder
+                )
         
-        val_list_images, val_list_labels, _ = mapdict_patches_filepath(test_list, ##invert val and test! IMPORTANT TO MATCH PRIOR DISTRIBUTION
-                                                                args.patch_folder)
-    elif args.schema == "NNN":
-        logger.info("Mapping test/val patches - ALL NC")
-        test_list_images, test_list_labels, _ = mapdict_patches_filepath(test_list_filepath, 
-                                                                         args.patch_folder
-                                                                         )
-  
-        val_list_images, val_list_labels, _ = mapdict_patches_filepath(val_list_filepath,
-                                                                        args.patch_folder
-                                                                        )
-    else:
-        raise ValueError(f"Unknown schema: {args.schema}")
+            val_list_images, val_list_labels, _ = mapdict_patches_filepath(
+                wp_val_list, args.patch_folder
+                )
+        case _:
+            raise ValueError(f"Unknown schema: {args.schema}")
+
 
     assert len(test_list_images) > 0, "test_list_images is empty"
     assert len(test_list_images) == len(test_list_labels)

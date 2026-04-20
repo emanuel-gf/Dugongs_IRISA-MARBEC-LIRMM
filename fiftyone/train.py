@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import pytorch_lightning as pl
 import kornia.augmentation as K
 from loguru import logger
@@ -21,7 +22,6 @@ from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
 from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
 from pytorch_lightning.loggers import WandbLogger
@@ -374,6 +374,7 @@ class RTDETRLightningModule(pl.LightningModule):
  
         self.model = RTDetrForObjectDetection.from_pretrained(
             checkpoint)
+        #self.model.train()
         self.augmentor = DugongAugmentor() if use_augmentation else None
         self.id2label  = id2label or {0: "dugong"}
         self._first_batch_done = False
@@ -384,8 +385,15 @@ class RTDETRLightningModule(pl.LightningModule):
 
         ##MaP
         # one metric object per split — they accumulate across batches
-        self.val_map  = MeanAveragePrecision(iou_type="bbox", box_format="xyxy")
-        self.test_map = MeanAveragePrecision(iou_type="bbox", box_format="xyxy")
+        self.val_map  = MeanAveragePrecision(iou_type="bbox", 
+                                             box_format="xyxy",
+                                             max_detection_thresholds=[1,10,300],
+                                             backend="faster_coco_eval",   # ← handles sparse area buckets correctly
+                                             )
+        self.test_map = MeanAveragePrecision(iou_type="bbox", box_format="xyxy",
+                                             max_detection_thresholds=[1, 10, 300],
+                                             backend="faster_coco_eval",   # ← handles sparse area buckets correctly
+                                             )
     # ── box padding helpers ───────────────────────────────────────────────
  
     def _pad_boxes(self, labels):
@@ -415,63 +423,93 @@ class RTDETRLightningModule(pl.LightningModule):
         ## return outputs.loss, outputs.loss_dict
         return outputs, labels
     
-    def _collect_map_inputs(self, outputs, labels, confidence_threshold
-                            ):
-        """
-        Convert raw RT-DETR outputs + ground-truth labels into the
-        list-of-dicts format that torchmetrics MeanAveragePrecision expects.
+    # def _collect_map_inputs(self, outputs, labels, confidence_threshold
+    #                         ):
+    #     """
+    #     Convert raw RT-DETR outputs + ground-truth labels into the
+    #     list-of-dicts format that torchmetrics MeanAveragePrecision expects.
 
-        torchmetrics preds format (one dict per image):
-            boxes  : (M, 4) xyxy  absolute pixels  — FloatTensor
-            scores : (M,)                           — FloatTensor
-            labels : (M,)                           — IntTensor
+    #     torchmetrics preds format (one dict per image):
+    #         boxes  : (M, 4) xyxy  absolute pixels  — FloatTensor
+    #         scores : (M,)                           — FloatTensor
+    #         labels : (M,)                           — IntTensor
 
-        torchmetrics targets format (one dict per image):
-            boxes  : (N, 4) xyxy  absolute pixels  — FloatTensor
-            labels : (N,)                           — IntTensor
-        """
-        # logits: (B, num_queries, num_classes)
-        # pred_boxes: (B, num_queries, 4) cxcywh normalised
-        scores_all = outputs.logits.sigmoid()           # (B, Q, C)
-        boxes_all  = outputs.pred_boxes                 # (B, Q, 4) cxcywh norm
+    #     torchmetrics targets format (one dict per image):
+    #         boxes  : (N, 4) xyxy  absolute pixels  — FloatTensor
+    #         labels : (N,)                           — IntTensor
+    #     """
+    #     # logits: (B, num_queries, num_classes)
+    #     # pred_boxes: (B, num_queries, 4) cxcywh normalised
+    #     scores_all = outputs.logits.sigmoid()           # (B, Q, C)
+    #     boxes_all  = outputs.pred_boxes                 # (B, Q, 4) cxcywh norm
 
-        preds   = []
-        targets = []
+    #     preds   = []
+    #     targets = []
+
+    #     for i, lbl in enumerate(labels):
+    #         # ── image size from label (stored by processor as [h, w]) ──
+    #         h, w = lbl["orig_size"].tolist()
+
+    #         # ── predictions ──────────────────────────────────────────
+    #         scores_i, classes_i = scores_all[i].max(dim=-1)   # (Q,), (Q,)
+    #         keep = scores_i > confidence_threshold
+
+    #         boxes_norm  = boxes_all[i][keep]                   # (M, 4) cxcywh norm
+    #         boxes_xyxy  = _cxcywh_to_xyxy(boxes_norm)          # (M, 4) xyxy norm
+    #         scale       = boxes_norm.new_tensor([w, h, w, h])
+    #         boxes_abs   = (boxes_xyxy * scale).clamp(0)        # (M, 4) xyxy abs pixels
+
+    #         preds.append({
+    #             "boxes":  boxes_abs.cpu(),
+    #             "scores": scores_i[keep].cpu(),
+    #             "labels": classes_i[keep].int().cpu(),
+    #         })
+
+    #         # ── ground truth ─────────────────────────────────────────
+    #         gt_boxes_norm = lbl["boxes"]                        # (N, 4) cxcywh norm
+    #         gt_boxes_abs  = (_cxcywh_to_xyxy(gt_boxes_norm) * scale).clamp(0)
+
+    #         targets.append({
+    #             "boxes":  gt_boxes_abs.cpu(),
+    #             "labels": lbl["class_labels"].int().cpu(),
+    #         })
+
+    #     return preds, targets
+
+    def _collect_map_inputs(self, outputs, labels, confidence_threshold=0.01):
+        scores_all = outputs.logits.sigmoid()
+        boxes_all  = outputs.pred_boxes
+
+        preds, targets = [], []
 
         for i, lbl in enumerate(labels):
-            # ── image size from label (stored by processor as [h, w]) ──
             h, w = lbl["orig_size"].tolist()
+            scale = boxes_all.new_tensor([w, h, w, h])
 
-            # ── predictions ──────────────────────────────────────────
-            scores_i, classes_i = scores_all[i].max(dim=-1)   # (Q,), (Q,)
-            keep = scores_i > confidence_threshold
+            scores_i, classes_i = scores_all[i].max(dim=-1)
 
-            boxes_norm  = boxes_all[i][keep]                   # (M, 4) cxcywh norm
-            boxes_xyxy  = _cxcywh_to_xyxy(boxes_norm)          # (M, 4) xyxy norm
-            scale       = boxes_norm.new_tensor([w, h, w, h])
-            boxes_abs   = (boxes_xyxy * scale).clamp(0)        # (M, 4) xyxy abs pixels
+            # low guard only — drops near-zero noise, doesn't truncate the PR curve
+            keep = scores_i > 0.01
+            boxes_abs = (_cxcywh_to_xyxy(boxes_all[i]) * scale).clamp(0)
 
             preds.append({
-                "boxes":  boxes_abs.cpu(),
+                "boxes":  boxes_abs[keep].cpu(),
                 "scores": scores_i[keep].cpu(),
                 "labels": classes_i[keep].int().cpu(),
             })
 
-            # ── ground truth ─────────────────────────────────────────
-            gt_boxes_norm = lbl["boxes"]                        # (N, 4) cxcywh norm
-            gt_boxes_abs  = (_cxcywh_to_xyxy(gt_boxes_norm) * scale).clamp(0)
-
+            gt_boxes_abs = (_cxcywh_to_xyxy(lbl["boxes"]) * scale).clamp(0)
             targets.append({
                 "boxes":  gt_boxes_abs.cpu(),
                 "labels": lbl["class_labels"].int().cpu(),
             })
 
         return preds, targets
-    # ── forward ──────────────────────────────────────────────────────────
- 
+    
+        # # ── forward ──────────────────────────────────────────────────────────
     def forward(self, pixel_values, labels=None):
         return self.model(pixel_values=pixel_values, labels=labels)
-    
+
     ## WEIGHT AND BIAS 
     def _log_loss_dict(self, prefix: str, loss: torch.Tensor, loss_dict: dict):
         """
@@ -520,7 +558,14 @@ class RTDETRLightningModule(pl.LightningModule):
                      on_step=False, on_epoch=True,
                      sync_dist=sync, batch_size=batch_size)
     # ── training ─────────────────────────────────────────────────────────
- 
+    def on_train_epoch_start(self):
+        self.model.train()
+        ## new inclusion trying to avoid the model to forget past stages during training.    
+        # freeze backbone BatchNorm — prevents catastrophic forgetting
+        for module in self.model.model.backbone.modules():
+            if isinstance(module, torch.nn.BatchNorm2d):
+                module.eval()
+
     def training_step(self, batch, batch_idx):
         pixel_values = batch["pixel_values"]
         labels = self._move_labels_to_device(batch["labels"])
@@ -589,19 +634,6 @@ class RTDETRLightningModule(pl.LightningModule):
         return outputs.loss
  
  
-    # ── validation ───────────────────────────────────────────────────────
-## OLD BEFORE IMPLEMENTEING MAP 
-    # def validation_step(self, batch, batch_idx):
-    #     loss, loss_dict = self._eval_step(batch)
-    #     self._log_loss_dict("val", loss, loss_dict)
-    #     return loss
- 
-    # # ── test ─────────────────────────────────────────────────────────────
- 
-    # def test_step(self, batch, batch_idx):
-    #     loss, loss_dict = self._eval_step(batch)
-    #     self._log_loss_dict("test", loss, loss_dict)
-        
     #     return loss
     def validation_step(self, batch, batch_idx):
         outputs, labels = self._eval_step(batch)
@@ -615,9 +647,10 @@ class RTDETRLightningModule(pl.LightningModule):
         self.val_map.update(preds, targets)
 
         return outputs.loss
-
+    
     def on_validation_epoch_end(self):
         map_result = self.val_map.compute()
+
 
         self.log("val/mAP",    map_result["map"],    prog_bar=True, sync_dist=False)
         self.log("val/mAP_50", map_result["map_50"], prog_bar=True, sync_dist=False)
@@ -629,6 +662,14 @@ class RTDETRLightningModule(pl.LightningModule):
             f"val/mAP_50={map_result['map_50']:.4f}  "
             f"val/mAP_75={map_result['map_75']:.4f}"
         )
+
+                # log all sub-metrics to diagnose the -1
+        logger.info(f"  map_small  = {map_result['map_small']:.4f}")
+        logger.info(f"  map_medium = {map_result['map_medium']:.4f}")
+        logger.info(f"  map_large  = {map_result['map_large']:.4f}")
+        logger.info(f"  mar_1      = {map_result['mar_1']:.4f}")
+        logger.info(f"  mar_10     = {map_result['mar_10']:.4f}")
+        logger.info(f"  mar_300    = {map_result['mar_300']:.4f}")
         self.val_map.reset()   # ← must reset after every epoch
 
 # ── test ─────────────────────────────────────────────────────────────
@@ -663,14 +704,29 @@ class RTDETRLightningModule(pl.LightningModule):
     # ── optimizer ────────────────────────────────────────────────────────
  
     def configure_optimizers(self):
-        optimizer = AdamW(self.model.parameters(),
-                        lr=self.hparams.lr,
-                        weight_decay=self.hparams.weight_decay)
+        # Separate backbone and head learning rates
+        backbone_params = [p for n, p in self.model.named_parameters() 
+                        if "backbone" in n]
+        head_params = [p for n, p in self.model.named_parameters() 
+                    if "backbone" not in n]
 
-        scheduler = CosineAnnealingLR(optimizer, T_max=self.hparams.max_epochs)
+        optimizer = AdamW([
+            {"params": backbone_params, "lr": self.hparams.lr * 0.1},  # 1e-5
+            {"params": head_params,     "lr": self.hparams.lr},         # 1e-4
+        ], weight_decay=self.hparams.weight_decay)
+
+        warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=3)
+        cosine = CosineAnnealingLR(optimizer, 
+                                   T_max=self.hparams.max_epochs // 2, 
+                                   eta_min=1e-6
+                                   )
+        scheduler = SequentialLR(optimizer, 
+                                 schedulers=[warmup, cosine], 
+                                 milestones=[3])
         return {
             "optimizer": optimizer,
-            "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"},
+            "lr_scheduler": {"scheduler": scheduler, 
+                             "interval": "epoch"},
         }
  
  
@@ -843,9 +899,9 @@ def train(
         logger=wandb_logger,
         callbacks=[
             ckpt_callback,
-            EarlyStopping(monitor="val/loss",
+            EarlyStopping(monitor="val/mAP_50",
                         patience=early_stopping_patience,
-                        mode="min"),
+                        mode="max"),
             LearningRateMonitor(logging_interval="epoch"),
         ],
         log_every_n_steps=100,

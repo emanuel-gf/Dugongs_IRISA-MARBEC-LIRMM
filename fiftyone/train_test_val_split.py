@@ -42,7 +42,7 @@ import os
 from pathlib import Path
 from loguru import logger
 import sys
-import datetime
+from datetime import datetime
 
 # LOGURU SETUP  — call once at startup; writes both to stderr and a dated file
 def setup_logger(log_dir: str ="/share/home/e2406743/code/Dugongs_IRISA-MARBEC-LIRMM/logs_train_test_split/", 
@@ -398,7 +398,7 @@ def plot_landscape_to_axes(axes, coords_list, labels, uniq_idx, km_idx):
         # Background: All potential candidates
         ax.scatter(coords_list[i][:, 0], 
                    coords_list[i][:, 1], 
-                   c='lightgrey', s=8, alpha=0.15)
+                   c='red', s=8, alpha=0.15)
         
         # 1. Cluster Representatives (The "Diversity" picks)
         ax.scatter(coords_list[i][km_idx, 0], coords_list[i][km_idx, 1], 
@@ -647,6 +647,7 @@ def argparse():
     return parse.parse_args()
 
 def main():
+    from datetime import datetime 
     datetime = datetime.now().strftime('%m%d_%H%M')
     PARTITIONS = [0.05,0.1,0.25,0.5,0.75,1.0]
     args = argparse()
@@ -659,7 +660,7 @@ def main():
     assert  os.path.isdir(args.output_img_dir), os.makedirs(args.output_img_dir, exist_ok=True)
 
     # set up logger
-    run_name = f"{args.seed}_datetime"
+    run_name = f"{datetime}"
     setup_logger(run_name=run_name)
     
     ## Load dataset and views from mongodb 

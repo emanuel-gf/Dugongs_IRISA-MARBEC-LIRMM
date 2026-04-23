@@ -926,7 +926,12 @@ def train(
 # ─────────────────────────────────────────────
 PARTITIONS = ['NC','partition_5', 'partition_10', 'partition_25', 'partition_50',
                 'partition_75', 'partition_100', 'ACLR_partition_5',
-                'ACLR_partition_10', 'ACLR_partition_25', 'ACLR_partition_50'
+                'ACLR_partition_10', 'ACLR_partition_25', 'ACLR_partition_50',
+                'partition_2', 'partition_4', 'partition_12', 'partition_24',
+                'partition_36', 'partition_44', 'partition_46', 'partition_49',
+                'ACLR_partition_2', 'ACLR_partition_4', 'ACLR_partition_12',
+                'ACLR_partition_24', 'ACLR_partition_36', 'ACLR_partition_44',
+                'ACLR_partition_46', 'ACLR_partition_49'
                 ]
  
 def parse_args():
@@ -1117,8 +1122,9 @@ def main():
     match args.partition:
         case p if p.startswith("ACLR_"):
             logger.info(f"ACTIVE LEARNING - Partition:{p}")
-
+            
             df = pd.read_parquet(args.csvpatches)
+            assert args.partition in df.columns.tolist(), f"Partition does not match"
             train_list_images = df.loc["images", p]
             train_list_labels = df.loc["labels", p]
  
@@ -1126,6 +1132,7 @@ def main():
             logger.info(f"RANDOM SELECTION - Partition: {p}")
 
             df = pd.read_parquet(args.csvpatches)
+            assert args.partition in df.columns.tolist(), f"Partition does not match"
             train_list_images = df.loc["images", p]
             train_list_labels = df.loc["labels", p]
         

@@ -25,22 +25,21 @@
 # ── environment ───────────────────────────────────────────────────────────────
 . /share/common/anaconda/etc/profile.d/conda.sh
 conda activate fifty
-mkdir -p logs
 which python
 
 # ── config — must match run_NC.sh exactly ─────────────────────────────────────
 SCHEMA="NWW"
-CSVFILE="/share/home/e2406743/dataset/df_filepaths/df_train_test_split_filepath_38.csv"
-CSVPATCHES="/share/home/e2406743/dataset/df_filepaths/df_train_test_split_filepath_PATCHES_wpartitions_seed_38.parquet"
+CSVFILE="/share/home/e2406743/dataset/df_filepaths/df_train_test_split_filepath_wpsubset1000_10.csv"
+CSVPATCHES="/share/home/e2406743/dataset/df_filepaths/df_train_test_split_filepath_PATCHES_wpartitions_seed_10.parquet"
 PATCH_FOLDER="/share/home/e2406743/dataset/exported_img/seed_42"
 OUTPUT_DIR="checkpoints"
-OUTPUT_INFERENCE = "inference_files"
+OUTPUT_INFERENCE = "/share/home/e2406743/code/Dugongs_IRISA-MARBEC-LIRMM/output_inference/"
 HF_REPO="manecomaneca/rtdetr"   # ← same repo NC pushed to
 HF_REVISION="nc-best"                          # ← must match run_NC.sh exactly
-
+NC_CHECKPOINT_DIR=/share/home/e2406743/code/Dugongs_IRISA-MARBEC-LIRMM/checkpoints/NNN_NC_SEED10_augm_0422_2254/hf_export
 # ── partition array (index → name) ───────────────────────────────────────────
-PARTITIONS=("partition_5" "partition_10" "partition_25"
-            "partition_50" "partition_75" "partition_100")
+PARTITIONS=('partition_2', 'partition_4', 'partition_12', 'partition_24',
+            'partition_36', 'partition_44', 'partition_46', 'partition_49')
 PARTITION="${PARTITIONS[$SLURM_ARRAY_TASK_ID]}"
 
 echo "============================================"
@@ -60,10 +59,11 @@ python ./fiftyone/train.py \
     --csvpatches    "$CSVPATCHES"   \
     --patch-folder  "$PATCH_FOLDER" \
     --output-dir    "$OUTPUT_DIR"   \
-    --batch-size    16              \
-    --max-epochs    45              \
-    --lr            5e-5            \
+    --batch-size    8              \
+    --max-epochs    100              \
+    --lr            1e-7            \
     --wandb-project "rtdetr-dugong" \
-    --nc-checkpoint-dir "/share/home/e2406743/code/Dugongs_IRISA-MARBEC-LIRMM/checkpoints/NNN_NC_SEED38_augm_0412_1511/hf_export" \
+    --nc-checkpoint-dir "$NC_CHECKPOINT_DIR" \
     --output-inference "$OUTPUT_INFERENCE" \
-    --early-stopping 20 \
+    --early-stopping 25 \
+    --augment 

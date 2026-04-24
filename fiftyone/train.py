@@ -937,10 +937,8 @@ PARTITIONS = ['NC','partition_5', 'partition_10', 'partition_25', 'partition_50'
 def parse_args():
     parser = argparse.ArgumentParser(description="Train RT-DETR on dugong patches")
     parser.add_argument('--schema', type=str, required=True)
-    parser.add_argument("--partition",    type=str,
-                         required=True, choices=PARTITIONS,
-                        help="Training partition strategy")
-    parser.add_argument("--csvfile",      type=str, required=True,
+    parser.add_argument("--partition", type=str, required=True,help="Training partition strategy")
+    parser.add_argument("--csvfile",type=str, required=True,
                         help="FULL PATH - CSV with train_nc / test_nc / val_nc / train_wp, test_wp, val_wp in columns")
     parser.add_argument("--csvpatches",   type=str, default=None,
                         help="Parquet file with pre-split patch filepaths (required for partition)")
@@ -1073,7 +1071,10 @@ def main():
     augmentation_flag = args.augment
 
     is_finetune = args.partition != 'NC'
- 
+    
+    # strip a comma weirdly being passed
+    args.partition = args.partition.strip().rstrip(',')
+    
     if is_finetune:
         assert args.csvpatches is not None, \
             "--csvpatches is required for partition_* runs"

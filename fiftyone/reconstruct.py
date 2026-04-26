@@ -316,15 +316,19 @@ def reconstruct_predictions(
 
 def reconstruct_and_nms(
     dataset: fo.Dataset,
-    predictions_dir: str | Path,
     field_name: str,
+    predictions_dir: str | Path = None,
+    raw_field: str | None = None,  # NEW: Optional raw_field to skip reconstruction
     iou_threshold: float = 0.35,
     tile_size: int = 640,
 ) -> None:
     """
     Reconstruct tile predictions AND apply Non-Maximum Suppression.
 
-    Step 1 — calls reconstruct_predictions → saves {field_name}_raw
+    If `raw_field` is provided, it skips reconstruction and directly applies NMS to the existing field.
+    Otherwise, it calls reconstruct_predictions to create the raw field first.
+
+    Step 1 — (if raw_field is None) calls reconstruct_predictions → saves {field_name}_raw
     Step 2 — runs torchvision.ops.nms per image → saves {field_name}_nms
 
     NMS is run in full-image xyxy absolute pixel space, then results are
@@ -333,24 +337,45 @@ def reconstruct_and_nms(
     Parameters
     ----------
     dataset         : fo.Dataset
-    predictions_dir : folder containing tile JSON files
+    predictions_dir : folder containing tile JSON files (ignored if raw_field is provided)
     field_name      : base name; _raw and _nms suffixes are added automatically
+    raw_field       : optional name of an existing raw field to use (skips reconstruction if provided)
     iou_threshold   : IoU threshold for NMS (default 0.35, tuned for small objects)
-    tile_size       : tile size used during inference (default 640)
+    tile_size       : tile size used during inference (default 640, ignored if raw_field is provided)
     """
     nms_field = f"{field_name}_nms"
 
-    # Step 1 — reconstruct raw
-    reconstruct_predictions(dataset, predictions_dir, field_name, tile_size)
-
-    raw_field = f"{field_name}_raw"
+    # Step 1: Reconstruct raw detections if raw_field is not provided
+    if raw_field is None:
+        assert predictions_dir is not None, f"Please encharge to pass the predictions"
+        raw_field = f"{field_name}_raw"
+        logger.info(f"Reconstructing raw detections from '{predictions_dir}'")
+        reconstruct_predictions(
+            dataset,
+            predictions_dir,
+            field_name,
+            tile_size
+        )
+    else:
+        logger.info(f"Using existing raw field: '{raw_field}' (skipping reconstruction)")
+        # Validate that the raw_field exists in the dataset
+        if raw_field not in dataset.get_field_schema():
+            raise ValueError(f"raw_field '{raw_field}' does not exist in the dataset")
 
     logger.info(f"Running NMS (iou_threshold={iou_threshold}) → field '{nms_field}'")
 
     n_before = 0
     n_after  = 0
 
-    for sample in dataset.iter_samples(autosave=True, progress=True):
+    # Create a view of the dataset that only includes samples with the raw_field
+    # This is more efficient than iterating through all samples
+    if raw_field in dataset.get_field_schema():
+        view = dataset.match(F(raw_field).exists())
+    else:
+        view = dataset
+
+    for sample in view.iter_samples(autosave=True, 
+                                    progress=True):
         img_w = sample.metadata.width
         img_h = sample.metadata.height
 
@@ -358,7 +383,7 @@ def reconstruct_and_nms(
         if raw is None or len(raw.detections) == 0:
             sample[nms_field] = fo.Detections(detections=[])
             # Store iou threshold used at sample level for traceability
-            sample[f"{field_name}_iou_threshold"] = iou_threshold
+            #sample[f"{field_name}_iou_threshold"] = iou_threshold
             continue
 
         before = raw.detections
@@ -368,7 +393,7 @@ def reconstruct_and_nms(
         n_after  += len(after)
 
         sample[nms_field] = fo.Detections(detections=after)
-        sample[f"{field_name}_iou_threshold"] = iou_threshold
+        #sample[f"{field_name}_iou_threshold"] = iou_threshold
 
     logger.success(
         f"reconstruct_and_nms complete → field '{nms_field}' saved | "

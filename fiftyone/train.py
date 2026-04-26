@@ -1050,6 +1050,11 @@ def _save_local(
     """
     local_dir = Path(local_dir)
     local_dir.mkdir(parents=True, exist_ok=True)
+
+     # ── patch the label map before saving ─────────────────────────────────
+    id2label = {0: "dugong"}
+    model.model.config.id2label = id2label          # inner HF model config
+    model.model.config.label2id = {"dugong": 0}
  
     logger.info(f"Saving model locally → {local_dir}")
     model.model.save_pretrained(local_dir)

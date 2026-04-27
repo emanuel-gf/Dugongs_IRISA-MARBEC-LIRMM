@@ -67,72 +67,6 @@ def setup_logger(log_dir: str ="/share/home/e2406743/code/Dugongs_IRISA-MARBEC-L
 
 
 
-def find_flight_candidates_WP(
-    wp_view,
-    wp_train_val_size: float,
-    wp_test_size: float,
-    subset_size: int,
-    seed: int = 0,
-    max_tries: int = 100,
-    fuzzy: int = 0.3,
-) -> Optional[Dict[str, str]]:
-    rng = random.Random(seed)
-    train_val_size = int(subset_size * wp_train_val_size)
-    min_test_size = int(subset_size * wp_test_size)
-
-    WP_dict_stratify_key = wp_view.count_values("stratify_key")
-    proportionality = wp_view.count_values("subregion")
-    full_set = len(wp_view) - proportionality["MANTASANDY"]
-
-    out_prop = {k: v / full_set for k, v in proportionality.items() if k != "MANTASANDY"}
-    proportional_budget_test = {k: int(v * min_test_size) for k, v in out_prop.items()}
-    proportional_budget_trainval = {k: int(v * train_val_size) for k, v in out_prop.items()}
-
-    islands_to_split = ["UM", "FRIWEN", "GAM"]
-    dict_island = {}
-    for island in islands_to_split:
-        island_view = wp_view.match(F("subregion") == island)
-        dict_island[island] = island_view.distinct("stratify_key")
-
-    flight_keys = set(WP_dict_stratify_key.keys())
-
-    for attempt in range(max_tries):
-        # Sample one flight per island
-        flight_candidates = {island: rng.choice(flights) for island, flights in dict_island.items()}
-        test_flights = set(flight_candidates.values())
-        test_flights.add("WP_MANTASANDY_MANTASANDY_M5")
-
-        # Validate test flights
-        valid = True
-        for island, flight in flight_candidates.items():
-            size = WP_dict_stratify_key[flight]
-            min_required = proportional_budget_test[island] * (1-fuzzy)
-            if size < min_required:
-                valid = False
-                break
-
-        if not valid:
-            continue
-
-        # Validate train/val flights
-        train_val_flights = flight_keys - test_flights
-        train_val_by_island = {k: 0 for k in proportional_budget_trainval.keys()}
-        for f in train_val_flights:
-            island = f.split("_")[1]
-            if island in train_val_by_island:
-                train_val_by_island[island] += WP_dict_stratify_key[f]
-
-        for island, total in train_val_by_island.items():
-            min_required = proportional_budget_trainval[island] - fuzzy
-            if total < min_required:
-                valid = False
-                break
-
-        if valid:
-            return flight_candidates, proportional_budget_test
-
-    return None, None
-
 # def find_flight_candidates_WP(
 #     wp_view,
 #     wp_train_val_size: float,
@@ -140,56 +74,21 @@ def find_flight_candidates_WP(
 #     subset_size: int,
 #     seed: int = 0,
 #     max_tries: int = 100,
-#     fuzzy: int = 3,
+#     fuzzy: int = 0.3,
 # ) -> Optional[Dict[str, str]]:
-#     """
-#     Find the flights mission candidates to be elected as TEST set only. This will be excluded from the whole
-#     downstream pipeline.
-
-#     Returns:
-#         dict: {island: selected_flight} if valid
-#         proportional_budget:dict. e.g: 'UM':54, 'FRIWEN': 32
-#         None: if no valid split found
-#     """
-
 #     rng = random.Random(seed)
-
 #     train_val_size = int(subset_size * wp_train_val_size)
 #     min_test_size = int(subset_size * wp_test_size)
 
-#     logger.info(f"Finding FLIGHT CANDIDATES = WEST PAPUA")
-#     logger.info(f"Total subset: {subset_size}")
-#     logger.info(f"Train/Val: {train_val_size}")
-#     logger.info(f"Test: {min_test_size}")
-
-#     # --- Stratify counts ---
 #     WP_dict_stratify_key = wp_view.count_values("stratify_key")
 #     proportionality = wp_view.count_values("subregion")
-
-#     # --- Remove MANTASANDY from proportionality ---
 #     full_set = len(wp_view) - proportionality["MANTASANDY"]
 
-#     out_prop = {
-#         k: v / full_set
-#         for k, v in proportionality.items()
-#         if k != "MANTASANDY"
-#     }
+#     out_prop = {k: v / full_set for k, v in proportionality.items() if k != "MANTASANDY"}
+#     proportional_budget_test = {k: int(v * min_test_size) for k, v in out_prop.items()}
+#     proportional_budget_trainval = {k: int(v * train_val_size) for k, v in out_prop.items()}
 
-#     # --- Budgets ---
-#     proportional_budget_test = {
-#         k: int(v * min_test_size) for k, v in out_prop.items()
-#     }
-
-#     proportional_budget_trainval = {
-#         k: int(v * train_val_size) for k, v in out_prop.items()
-#     }
-
-#     logger.info(f"Test budget: {proportional_budget_test}")
-#     logger.info(f"Train/Val budget: {proportional_budget_trainval}")
-
-#     # --- Flights per island ---
 #     islands_to_split = ["UM", "FRIWEN", "GAM"]
-
 #     dict_island = {}
 #     for island in islands_to_split:
 #         island_view = wp_view.match(F("subregion") == island)
@@ -197,26 +96,17 @@ def find_flight_candidates_WP(
 
 #     flight_keys = set(WP_dict_stratify_key.keys())
 
-#     # --- Try multiple times ---
 #     for attempt in range(max_tries):
-
-#         # 1. Sample one flight per island
-#         flight_candidates = {
-#             island: rng.choice(flights)
-#             for island, flights in dict_island.items()
-#         }
-
-#         # 2. Add fixed test flight
+#         # Sample one flight per island
+#         flight_candidates = {island: rng.choice(flights) for island, flights in dict_island.items()}
 #         test_flights = set(flight_candidates.values())
-#         test_flights.add("WP_MANTASANDY_MANTASANDY_M5")  # adjust if needed
+#         test_flights.add("WP_MANTASANDY_MANTASANDY_M5")
 
-#         # --- 3. TEST VALIDATION ---
+#         # Validate test flights
 #         valid = True
-
 #         for island, flight in flight_candidates.items():
 #             size = WP_dict_stratify_key[flight]
-#             min_required = proportional_budget_test[island] - fuzzy
-
+#             min_required = proportional_budget_test[island] * (1-fuzzy)
 #             if size < min_required:
 #                 valid = False
 #                 break
@@ -224,43 +114,34 @@ def find_flight_candidates_WP(
 #         if not valid:
 #             continue
 
-#         # --- 4. TRAIN/VAL VALIDATION ---
+#         # Validate train/val flights
 #         train_val_flights = flight_keys - test_flights
-
 #         train_val_by_island = {k: 0 for k in proportional_budget_trainval.keys()}
-
 #         for f in train_val_flights:
-#             island = f.split("_")[1]  # assumes format WP_<ISLAND>_...
+#             island = f.split("_")[1]
 #             if island in train_val_by_island:
 #                 train_val_by_island[island] += WP_dict_stratify_key[f]
 
 #         for island, total in train_val_by_island.items():
 #             min_required = proportional_budget_trainval[island] - fuzzy
-
 #             if total < min_required:
 #                 valid = False
 #                 break
 
 #         if valid:
-#             logger.success(f"[SUCCESS] Found split at attempt {attempt}")
-#             logger.success(f"Test flights: {test_flights}")
-#             #for flight in test_flights:
-#                 #print(f"{flight}:{WP_dict_stratify_key[flight]}")
-#             return flight_candidates,proportional_budget_test
+#             return flight_candidates, proportional_budget_test
 
-#     logger.fail("[FAIL] No valid split found")
-#     return None,None
+#     return None, None
 
 
-def tagged_traintest_seeded_split_subset_WP(
+def tag_traintest_seeded_split_subset_WP(
     dataset,
-    wp_view,
+    partitions_wp:np.array,
+    wp_dict_stratify, 
     wp_train_size: float,
     wp_val_size:float,
     wp_test_size: float,
-    subset_size: int,
     flight_candidates, 
-    proportional_budget_test,
     seed: int = 0,
     ):
     """
@@ -287,8 +168,7 @@ def tagged_traintest_seeded_split_subset_WP(
     # set the seed
     rng = random.Random(seed)
 
-    if subset_size is None:
-        subset_size = len(wp_view)
+    subset_size = partitions_wp[-1]
 
     train_size = int(subset_size*wp_train_size)
     val_size =   int(subset_size*wp_val_size)
@@ -298,35 +178,40 @@ def tagged_traintest_seeded_split_subset_WP(
     logger.info(f"Train size:{train_size}")
     logger.info(f"Val size:{val_size}")
     logger.info(f"Test size:{test_size}")
-    logger.info(f"Proportional budget:{proportional_budget_test}")
     
-    # transform the dict into a list, if not comes as a list 
-    if type(flight_candidates)==dict:
-        flight_candidates = list(flight_candidates.values())
+    proportion = 1/len(flight_candidates) #if there is 2 island, so 50% from each for test 
+    each_flight_contribution = int(proportion*test_size)
 
     ## TAG TEST
     for flight in flight_candidates:
-        logger.info(f"Running flight:{flight}")
-        retrieve_island = flight.split('_',2)[1] # get island
-        proportion_test_size = proportional_budget_test[retrieve_island]
-        subset_view = dataset.match(F("stratify_key")==flight)
-        if len(subset_view) > proportion_test_size:
-            logger.info(f"Subseting Test: {len(subset_view)} -> {proportion_test_size}")
-            
-            flight_mission_ids = subset_view.values('id')
-            # retrieves the list of ids regarding the flight
-            new_test_subset = rng.choices(flight_mission_ids, 
-                                          k=proportion_test_size)
+        logger.info(f"TAGGING TEST | Running flight:{flight}")
 
-            not_in_subset = [ii for ii in flight_mission_ids if ii not in new_test_subset]
-            
-            # subset
-            # TAG all these new samples. 
-            dataset.select(new_test_subset).tag_samples(f"test_{str(seed)}")
-            dataset.select(not_in_subset).tag_samples(f"notin_TEST_{str(seed)}")
+        subset_view = dataset.match(F("stratify_key")==flight)
+
+        flight_mission_ids = subset_view.values('id')
+
+        if len(flight_mission_ids) < each_flight_contribution:
+            kk = len(flight_mission_ids)
+        else:
+            kk = each_flight_contribution
+        new_test_subset = rng.sample(flight_mission_ids, 
+                                        k= kk
+                                        )
+
+        not_in_subset = [ii for ii in flight_mission_ids if ii not in new_test_subset]
+
+        # subset
+        # TAG all these new samples. 
+        dataset.select(new_test_subset).tag_samples(f"test_{str(seed)}")
+        dataset.select(not_in_subset).tag_samples(f"notin_TEST_{str(seed)}")
+
+        # TAG MANTASANDY AS TEST ALWAYS
+        dataset.match(F("stratify_key")=="WP_MANTASANDY_MANTASANDY_M5").tag_samples(f"test_{str(seed)}")
 
     ## TAG AND SELECT TRAIN/VAL
-    all_flights = wp_view.distinct('stratify_key')
+    all_flights = list(wp_dict_stratify.keys()) #unified list 
+    #exclude mantansady
+    all_flights = [flight for flight in all_flights if flight not in ['WP_MANTASANDY_MANTASANDY_M5']]
     not_in_flights = [f for f in all_flights if f not in flight_candidates]
 
     ## subset view of trainval
@@ -341,10 +226,12 @@ def tagged_traintest_seeded_split_subset_WP(
                 random_state=seed,
                 shuffle=True
             )
+    
     # subset the val before tag eveything
     ## train is tagged full, because it can be choosen within the active learninng pipeline
-    subset_val_ids = rng.choices(val_ids,
-                                 k=int(wp_val_size*subset_size))
+    subset_val_ids = rng.sample(val_ids,
+                                 k=int(val_size)
+                                 )
     notin_val_ids = [id for id in val_ids if id not in subset_val_ids]
      
     # tag all train and val samples. The subset will be done later on the chain. 
@@ -352,105 +239,110 @@ def tagged_traintest_seeded_split_subset_WP(
     dataset.select(subset_val_ids).tag_samples(f"val_{str(seed)}")
     dataset.select(notin_val_ids).tag_samples(f"notin_val_{str(seed)}")
     logger.success(f"WP completed and tagged! On seed:{seed}")
+
+    ## Log everything
+    #
     
 
-def find_seed_for_valid_split_NC(
-    nc_view,
-    seed_range=range(5000),
-    test_size=0.15,
-    fuzzy=0.03,
-    k_choices=(1, 2, 3, 4),
-    max_tries=100
+def suggest_candidates(
+    dict_stratify:dict,
+    used_flights,
+    k_choices=(2, 3, 4),
+    max_tries=100,
+    min_test_size=0.1,
+    test_buffer=0.05
+):  
+    #print(dict_stratify)
+    total_size = np.array(list(dict_stratify.values())).reshape(-1).sum(axis=0)
+    # prioritize unused flights
+    unused = [k for k in dict_stratify if k not in used_flights]
+    pool = unused if len(unused) >= min(k_choices) else list(dict_stratify.keys())
+
+    for _ in range(max_tries):
+        kk = min(random.choice(k_choices), len(pool))
+        candidates = random.sample(pool, k=kk)
+
+        candidates_sum = sum(dict_stratify[c] for c in candidates)
+        ratio = (candidates_sum / total_size)
+
+        if min_test_size <= ratio <= (min_test_size + test_buffer):
+            logger.info(f"Found flight candidates: {candidates}")
+            logger.info(f"Efective test size:{np.array([dict_stratify[cand] for cand in candidates]).sum()}")
+            logger.info(f"Effective Ratio test size:{ratio}")
+            return candidates
+
+    return None
+
+    
+# check if they existed before 
+def check_already_selected_candidates(
+    old_list_candidates,
+    new_candidates
     ):
-    """
-    Find the seed that completes the flight mission split for New Caledonia (NC).
-    Returns:
-        tuple: (seed, flights_choice) if a valid split is found, else (None, None)
-    """
-    logger.info("---------------------")
-    logger.info("New run: Searching for valid NC test flight split...")
-
-    dict_flights = nc_view.count_values('stratify_key')
-    available_flights = list(dict_flights.keys())
-    num_flights = len(available_flights)
-
-    for seed in seed_range:
-        rng = random.Random(seed)
-        budget = len(nc_view) * test_size
-        superior_limit = len(nc_view) * (test_size + fuzzy)
-
-        for attempt in range(max_tries):
-            # Ensure k does not exceed the number of available flights
-            valid_k_choices = [k for k in k_choices if k <= num_flights]
-            if not valid_k_choices:
-                logger.warning(f"No valid k_choices (all are > {num_flights} flights). Skipping seed {seed}.")
-                break
-
-            k = rng.choice(valid_k_choices)  # Deterministic choice of k
-            flights_choice = rng.sample(available_flights, k=k)  # Sample without replacement
-            sum_nc_train = sum(dict_flights[f] for f in flights_choice)
-
-            if budget <= sum_nc_train <= superior_limit:
-                logger.success(f"Matched for seed {seed}:")
-                logger.info(f"  Flights selected for test: {flights_choice}")
-                logger.info(f"  k used: {k}")
-                logger.info(f"  Budget: {budget:.0f}, Superior limit: {superior_limit:.0f}")
-                logger.info(f"  Number of images: {sum_nc_train}")
-                return seed, flights_choice
-
-        # If no match found after max_tries for this seed, continue to next seed
-        logger.debug(f"No valid split found for seed {seed} after {max_tries} attempts.")
-
-    logger.warning("No valid seed found in the given range.")
-    return None, None
+    return sum(1 for flight in new_candidates if flight in old_list_candidates)
 
 
-# def find_seed_for_valid_split_NC(nc_view, 
-#                                 seed_range=range(5000),
-#                                 test_size=0.15, 
-#                                 fuzzy=0.03,
-#                                 k_choices=(1, 2, 3, 4),
-#                                 max_tries=100
-#                                 ):
+# def find_seed_for_valid_split_NC(
+#     list_flight_candidates,
+#     partitions: np.array, #[5,25,50,75,100] if subset size is 100
+#     seed_range=range(5000),
+#     test_size=0.15,
+#     fuzzy=0.03,
+#     k_choices=(1, 2, 3, 4),
+#     max_tries=100
+#     ):
 #     """
-#     Find the seed that completes the flight mission split
+#     Find the seed that completes the flight mission split for New Caledonia (NC).
+#     Args:
+#         Partitions: Integers of full size of the dataset.
+#     Returns:
+#         tuple: (seed, flights_choice) if a valid split is found, else (None, None)
 #     """
-#     logger.info(f"--------------------- \n")
-#     logger.info(f"New run")
+#     logger.info("---------------------")
+#     logger.info("New run: Searching for valid NC test flight split...")
 
-#     dict_flights = nc_view.count_values('stratify_key')
+#     nc_view_size = partitions[-1]
+#     flight_candidates = list_flight_candidates
+#     num_flights = len(flight_candidates)
 
 #     for seed in seed_range:
-#         rng = random.Random(seed) 
-
+#         rng = random.Random(seed)
 #         budget = len(nc_view) * test_size
 #         superior_limit = len(nc_view) * (test_size + fuzzy)
 
 #         for attempt in range(max_tries):
-#             k = random.choice(k_choices)  # random pick of how many independent flight missions
-#             flights_choice = rng.choices(list(dict_flights.keys()), 
-#                                             k=k
-#                                             )
-#             sum_nc_train = np.array([dict_flights[f] for f in flights_choice]).sum()
+#             # Ensure k does not exceed the number of available flights
+#             valid_k_choices = [k for k in k_choices if k <= num_flights]
+#             if not valid_k_choices:
+#                 logger.warning(f"No valid k_choices (all are > {num_flights} flights). Skipping seed {seed}.")
+#                 break
+
+#             k = rng.choice(valid_k_choices)  # Deterministic choice of k
+#             flights_choice = rng.sample(available_flights, k=k)  # Sample without replacement
+#             sum_nc_train = sum(dict_flights[f] for f in flights_choice)
 
 #             if budget <= sum_nc_train <= superior_limit:
-#                 logger.success("Matched:")
-#                 logger.info(f"flights selected for test: {flights_choice}")
-#                 logger.info(f"k used: {k}")
-#                 logger.info(f"budget: {budget}, superior limit: {superior_limit}")
-#                 logger.info(f"number of images: {sum_nc_train}")
+#                 logger.success(f"Matched for seed {seed}:")
+#                 logger.info(f"  Flights selected for test: {flights_choice}")
+#                 logger.info(f"  k used: {k}")
+#                 logger.info(f"  Budget: {budget:.0f}, Superior limit: {superior_limit:.0f}")
+#                 logger.info(f"  Number of images: {sum_nc_train}")
 #                 return seed, flights_choice
+
+#         # If no match found after max_tries for this seed, continue to next seed
+#         logger.debug(f"No valid split found for seed {seed} after {max_tries} attempts.")
+
+#     logger.warning("No valid seed found in the given range.")
+#     return None, None
 
 
     
 
 def tag_traintest_seeded_NC(dataset,
-                            nc_view,
                             nc_flight_candidates:list,
+                            nc_dict_stratify, 
                             seed_number:int, 
-                            nc_train_size:float,
-                            nc_val_size:float,
-                            nc_test_size:float):
+                            nc_val_size:float):
     """
     For a given random seed, find which flight mission should be used to test.
     Then, tag all these flights without subsetting the NC. 
@@ -458,7 +350,7 @@ def tag_traintest_seeded_NC(dataset,
     Tag everything.
     """
     
-    dict_flights = nc_view.count_values('stratify_key')
+    dict_flights = nc_dict_stratify
 
 
     # GET THESE TEST ids
@@ -497,17 +389,19 @@ def tag_traintest_seeded_NC(dataset,
         
 
 def run_seeded_splits_and_TAG(dataset, 
-                      nc_view, 
-                      wp_view, 
-                      runs: int, 
-                      subset_size: int = 760,
-                      nc_test_size:float = 0.15,
-                      nc_train_size:float = 0.8,
-                      nc_val_size:float = 0.2,
-                      wp_train_val_size:float = 0.9,
-                      wp_train_size:float = 0.85,
-                      wp_val_size:float = 0.15,
-                      wp_test_size: float = 0.1
+                                runs: int, 
+                                dict_stratify_nc:dict, 
+                                dict_stratify_wp:dict,
+                                partitions_wp:np.array,
+                                partitions_nc:np.array,
+                                subset_size: int = 760,
+                                nc_test_size:float = 0.15,
+                                nc_train_size:float = 0.8,
+                                nc_val_size:float = 0.2,
+                                wp_train_val_size:float = 0.9,
+                                wp_train_size:float = 0.85,
+                                wp_val_size:float = 0.15,
+                                wp_test_size: float = 0.1,
                         ):
     """
     Run seeded splits for NC and WP, ensuring:
@@ -521,97 +415,67 @@ def run_seeded_splits_and_TAG(dataset,
     # From this train/val flight mission, if the view needs to subset, so a set of is tagged on train/val
     # and the remaining are tagged as notin_train_ and notin_val 
     """
+    
+    assert partitions_wp[-1] > 1.1, f"Probably passing the relative partition"
+    wp_size = partitions_wp[-1]
+    assert partitions_nc[-1] > 1.1, f"Probably passing the relative partition"
+    nc_size = partitions_nc[-1]
+
     used_flights_NC = []
     used_flights_WP = []
     seeds_list = []
 
     # loop to the number of runs to do this task.
     for run in range(runs + 1):
-        # --- NC: Find seed and flights ---
-        seed_number, selected_flights_NC_TEST = find_seed_for_valid_split_NC(
-            nc_view,
-            seed_range=range(1000),
-            test_size=nc_test_size,
-            fuzzy=0.03,
-            max_tries=50
+        logger.info(f"{run} - RUN OF FINDING CANDIDATES")
+        # --- NC: Find seed and candidates ---
+        nc_candidates = suggest_candidates(
+            dict_stratify= dict_stratify_nc,
+            used_flights=used_flights_NC
         )
-
-        # Count how many flights are already used (duplicates)
-        duplicate_count = sum(1 for flight in selected_flights_NC_TEST if flight in used_flights_NC)
-
-        # Only retry if 2 or more flights are duplicates (i.e., less than 2 are unique)
-        while duplicate_count >= len(selected_flights_NC_TEST) - 3:  # Allow at least 2 unique flights
-            seed_number, selected_flights_NC_TEST = find_seed_for_valid_split_NC(
-                nc_view,
-                seed_range=range(seed_number + 1, (run + 2) * 1000),
-                test_size=nc_test_size,
-                fuzzy=0.03,
-                max_tries=50
-            )
-            duplicate_count = sum(1 for flight in selected_flights_NC_TEST if flight in used_flights_NC)
-
+        logger.info(f"NC candidates:{nc_candidates}")
         ## append to the list 
         # Add the new flights to the used list (even if 1 is a duplicate)
-        used_flights_NC.extend(selected_flights_NC_TEST)
+        used_flights_NC.extend(nc_candidates)
+        seed_number = int(run * random.randint(1,100))
         seeds_list.append(seed_number)
 
+        ## WP
+        wp_candidates = suggest_candidates(
+            dict_stratify= dict_stratify_wp,
+            used_flights=used_flights_WP,
+            k_choices=(2,3,4),
+            )
+        used_flights_WP.extend(wp_candidates)
+        logger.info(f"WP candidates:{wp_candidates}")
+        logger.info(f'test size:{np.array([dict_stratify_wp[cand] for cand in wp_candidates]).sum()}')
+        print_train_size = [dict_stratify_wp[cand] for cand in dict_stratify_wp.keys() if cand not in wp_candidates]
+        logger.info(f'train size:{np.array(print_train_size).reshape(-1).sum(axis=0)}')
+       
+
+        ## TAG 
         ## ----------------------------------------------
         # Tag NC
         tag_traintest_seeded_NC(
             dataset,
-            nc_view,
-            nc_flight_candidates=selected_flights_NC_TEST,
+            nc_flight_candidates=nc_candidates,
+            nc_dict_stratify=dict_stratify_nc,
             seed_number=seed_number,
-            nc_train_size=nc_train_size,
             nc_val_size=nc_val_size,
-            nc_test_size=nc_test_size
         )
 
         ## WP WP WP WP WP  WP 
-        ## ------------------------------------
-        # --- WP: Find flights ---
-        flight_candidates, proportional_budget_test = find_flight_candidates_WP(
-            wp_view,
-            wp_train_val_size=wp_train_val_size,
-            wp_test_size=wp_test_size,
-            subset_size=subset_size,
-            seed=seed_number,
-            max_tries=100,
-            fuzzy=3
-        )
-
-        # Ensure flights are unique
-        ## Here we allow that if 2 out of 3 flights are unique, so the test set is considered unique
-        # Count how many flights are already used
-        used_count = sum(1 for flight in flight_candidates.values() if flight in used_flights_WP)
-
-        # Only retry if 2 or more flights are duplicates
-        while used_count >= 2:
-            flight_candidates, _ = find_flight_candidates_WP(
-                wp_view,
-                wp_train_val_size=wp_train_val_size,
-                wp_test_size=wp_test_size,
-                subset_size=subset_size,
-                seed=seed_number*1000,
-                max_tries=100,
-                fuzzy=3
-            )
-            used_count = sum(1 for flight in flight_candidates.values() if flight in used_flights_WP)
-
-        # Add the new flights to the used list (even if 1 is a duplicate)
-        used_flights_WP.extend(flight_candidates.values())
 
         # Tag WP
-        tagged_traintest_seeded_split_subset_WP(
+        tag_traintest_seeded_split_subset_WP(
             dataset,
-            wp_view,
-            wp_train_size=wp_train_size,  # 80% of the remaining 90% (after test)
-            wp_val_size=wp_val_size,     # 20% of the remaining 90%
-            wp_test_size=wp_test_size,
-            subset_size=subset_size,
-            flight_candidates=flight_candidates,
+            partitions_wp = partitions_wp,  
+            wp_dict_stratify = dict_stratify_wp,
+            flight_candidates = wp_candidates,
+            wp_train_size = wp_train_size,  # 80% of the remaining 90% (after test)
+            wp_val_size = wp_val_size,     # 20% of the remaining 90%
+            wp_test_size = wp_test_size,
             seed=seed_number,
-            proportional_budget_test = proportional_budget_test
         )
 
     return seeds_list
@@ -1142,7 +1006,7 @@ def argparse():
 def main():
     from datetime import datetime 
     datetime = datetime.now().strftime('%m%d_%H%M')
-    PARTITIONS_ = [0.05,0.1,0.25,0.5,0.75,0.90,0.95, 1.0]
+    
     args = argparse()
     logger.info(args)
 
@@ -1157,33 +1021,54 @@ def main():
     run_name = f"{datetime}"
     setup_logger(run_name=run_name)
     
+    
     ## Load dataset and views from mongodb 
     dataset = fo.load_dataset(dataset_mongodb)
     ## load the views
-    nc_view = dataset.match(F('region').starts_with('NC'))
-    wp_view = dataset.match(F('region').starts_with('WP'))
+    nc_view = dataset.match(F("region")=="NC")
+    wp_view = dataset.match(F("region")=="WP")
+
+    ## Unified strategy
+    nc_true_size = len(nc_view)
+    wp_true_size = len(wp_view)
+    _dictwp = wp_view.count_values('stratify_key')
+    _dictnc = nc_view.count_values('stratify_key')
+    wp_stratify_dict =  dict(sorted(_dictwp.items()))
+    nc_stratify_dict = dict(sorted(_dictnc.items()))
+    ## clean all tags
+    list_tags = list(dataset.distinct("tags"))
+    dataset.untag_samples(list_tags)
 
     ## check if the dataset has the key used for stratification
     assert dataset._has_field(args.stratify_key), f"Field does not exist in the dataset. Please add it before run"
+    assert len(dataset.distinct('tags'))==0, f"Dindt delete last tags"
 
+    PARTITIONS_ = np.array([0.05, 0.1, 0.25, 0.35, 0.5, 0.75, 0.90, 0.95, 1.0])
     # If a subset if given, so the whole pipeline process as a new size
     if args.subset_size is not None:
-            wp_subset_size = int(args.subset_size)
+            wp_subset_size = int(args.subset_size) # e.g 1000
+            ratio_subset = (wp_subset_size / wp_true_size)
             # multiply the ratio by the partitions to retrieve the partition per subset
-            PARTITIONS = np.array(PARTITIONS_)*np.array((wp_subset_size/len(wp_view)))
+            partitions_wp_int = np.floor(PARTITIONS_*wp_subset_size).astype('int64')
+            PARTITIONS_NC = PARTITIONS_
+            partitions_nc_int = np.floor(PARTITIONS_*nc_true_size).astype('int64')
             logger.info(f"SUBSET MODE | ON:")
-            logger.info(f"old partitions:{PARTITIONS_}")
-            logger.info(f"Adapted partitions:{PARTITIONS}")
-            logger.info(f"Size of the total WP:{len(wp_view)}")
+            ##logger.info(f"old partitions:{PARTITIONS_}") #[0.05, 0.1, 0.25]
+            logger.info(f"Size of the total WP:{wp_true_size}")
             logger.info(f"New size of subset:{wp_subset_size}")
+            logger.info(f"WP partitions:{partitions_wp_int}")
+            logger.info(f"NC full size")
     else:
-            PARTITIONS = PARTITIONS_
+            PARTITIONS_WP = PARTITIONS_
+            partitions_nc_int = np.floor(PARTITIONS_*nc_true_size).astype('int64')
 
     ## run the split and tag the dataset. 
     logger.info(f"tagging the dataset and split the train,test,val")
     seed_number_list = run_seeded_splits_and_TAG(dataset, 
-                                                nc_view, 
-                                                wp_view, 
+                                                dict_stratify_nc=nc_stratify_dict,
+                                                dict_stratify_wp=wp_stratify_dict,
+                                                partitions_nc = partitions_nc_int,
+                                                partitions_wp = partitions_wp_int,
                                                 runs = args.num_seeds, 
                                                 subset_size =  wp_subset_size,
                                                 nc_test_size = args.nc_test_size,

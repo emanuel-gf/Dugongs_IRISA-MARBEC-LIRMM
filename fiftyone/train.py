@@ -979,8 +979,7 @@ def parse_args():
                              "<output-dir>/<run-name>/hf_export/ "
                              "(use the printed path as --nc-checkpoint-dir for partition runs)")
     parser.add_argument("--no-save-checkpoints", action="store_true", default=False,
-                    help="Disable checkpoint saving — use for fine-tuning runs "
-                         "where only inference outputs matter.")
+                    help="Disable checkpoint saving — use for fine-tuning runs ")
     return parser.parse_args()
 
 

@@ -67,71 +67,6 @@ def setup_logger(log_dir: str ="/share/home/e2406743/code/Dugongs_IRISA-MARBEC-L
 
 
 
-# def find_flight_candidates_WP(
-#     wp_view,
-#     wp_train_val_size: float,
-#     wp_test_size: float,
-#     subset_size: int,
-#     seed: int = 0,
-#     max_tries: int = 100,
-#     fuzzy: int = 0.3,
-# ) -> Optional[Dict[str, str]]:
-#     rng = random.Random(seed)
-#     train_val_size = int(subset_size * wp_train_val_size)
-#     min_test_size = int(subset_size * wp_test_size)
-
-#     WP_dict_stratify_key = wp_view.count_values("stratify_key")
-#     proportionality = wp_view.count_values("subregion")
-#     full_set = len(wp_view) - proportionality["MANTASANDY"]
-
-#     out_prop = {k: v / full_set for k, v in proportionality.items() if k != "MANTASANDY"}
-#     proportional_budget_test = {k: int(v * min_test_size) for k, v in out_prop.items()}
-#     proportional_budget_trainval = {k: int(v * train_val_size) for k, v in out_prop.items()}
-
-#     islands_to_split = ["UM", "FRIWEN", "GAM"]
-#     dict_island = {}
-#     for island in islands_to_split:
-#         island_view = wp_view.match(F("subregion") == island)
-#         dict_island[island] = island_view.distinct("stratify_key")
-
-#     flight_keys = set(WP_dict_stratify_key.keys())
-
-#     for attempt in range(max_tries):
-#         # Sample one flight per island
-#         flight_candidates = {island: rng.choice(flights) for island, flights in dict_island.items()}
-#         test_flights = set(flight_candidates.values())
-#         test_flights.add("WP_MANTASANDY_MANTASANDY_M5")
-
-#         # Validate test flights
-#         valid = True
-#         for island, flight in flight_candidates.items():
-#             size = WP_dict_stratify_key[flight]
-#             min_required = proportional_budget_test[island] * (1-fuzzy)
-#             if size < min_required:
-#                 valid = False
-#                 break
-
-#         if not valid:
-#             continue
-
-#         # Validate train/val flights
-#         train_val_flights = flight_keys - test_flights
-#         train_val_by_island = {k: 0 for k in proportional_budget_trainval.keys()}
-#         for f in train_val_flights:
-#             island = f.split("_")[1]
-#             if island in train_val_by_island:
-#                 train_val_by_island[island] += WP_dict_stratify_key[f]
-
-#         for island, total in train_val_by_island.items():
-#             min_required = proportional_budget_trainval[island] - fuzzy
-#             if total < min_required:
-#                 valid = False
-#                 break
-
-#         if valid:
-#             return flight_candidates, proportional_budget_test
-
-#     return None, None
 
 
 def tag_traintest_seeded_split_subset_WP(
@@ -141,7 +76,7 @@ def tag_traintest_seeded_split_subset_WP(
     wp_train_size: float,
     wp_val_size:float,
     wp_test_size: float,
-    flight_candidates, 
+    flight_candidates:list, 
     seed: int = 0,
     ):
     """
@@ -165,6 +100,11 @@ def tag_traintest_seeded_split_subset_WP(
         flight_candidates: List or Dict. If dict 'UM':'flight_mission', ...
         subset_size: int. If no subset size is given, so the subset is the same sie as the full wp view. 
     """
+    ## sort the dict by the values
+    wp_strati_dict_sorted_by_values =  dict(sorted(wp_dict_stratify.items(), key=lambda x: x[1]))
+    # ensure flight candidates follows a ascending order when processing
+    flight_candidates = [f for f in wp_strati_dict_sorted_by_values.keys() if f in flight_candidates]
+
     # set the seed
     rng = random.Random(seed)
 
@@ -181,7 +121,7 @@ def tag_traintest_seeded_split_subset_WP(
     
     proportion = 1/len(flight_candidates) #if there is 2 island, so 50% from each for test 
     each_flight_contribution = int(proportion*test_size)
-
+    remaining_budget = 0
     ## TAG TEST
     for flight in flight_candidates:
         logger.info(f"TAGGING TEST | Running flight:{flight}")
@@ -192,14 +132,23 @@ def tag_traintest_seeded_split_subset_WP(
 
         if len(flight_mission_ids) < each_flight_contribution:
             kk = len(flight_mission_ids)
+            diff = np.abs(len(flight_mission_ids) - each_flight_contribution)
+            remaining_budget += diff
         else:
-            kk = each_flight_contribution
+            if len(flight_mission_ids) >= (each_flight_contribution+remaining_budget):
+                kk = each_flight_contribution + remaining_budget
+                remaining_budget = 0
+            else:
+                kk = len(flight_mission_ids)
+                 
         new_test_subset = rng.sample(flight_mission_ids, 
                                         k= kk
                                         )
 
         not_in_subset = [ii for ii in flight_mission_ids if ii not in new_test_subset]
 
+        logger.info(f"New subset test for given flight: {len(new_test_subset)}")
+        logger.info(f"NOTIN New subset for given flight: {len(not_in_subset)}")
         # subset
         # TAG all these new samples. 
         dataset.select(new_test_subset).tag_samples(f"test_{str(seed)}")
@@ -221,11 +170,13 @@ def tag_traintest_seeded_split_subset_WP(
 
     train_ids, val_ids = train_test_split(
                 ids_trainval, 
-                test_size= wp_train_size, 
+                test_size= wp_val_size, 
                 stratify=strata_trainval, 
                 random_state=seed,
                 shuffle=True
             )
+    logger.info(f"Length of Train WP after stratitfy split; {len(train_ids)}")
+    logger.info(f"Length of Val WP after stratitfy split; {len(val_ids)}")
     
     # subset the val before tag eveything
     ## train is tagged full, because it can be choosen within the active learninng pipeline
@@ -233,7 +184,7 @@ def tag_traintest_seeded_split_subset_WP(
                                  k=int(val_size)
                                  )
     notin_val_ids = [id for id in val_ids if id not in subset_val_ids]
-     
+    logger.info(f"Reduced val:{len(subset_val_ids)}")
     # tag all train and val samples. The subset will be done later on the chain. 
     dataset.select(train_ids).tag_samples(f"train_{str(seed)}")
     dataset.select(subset_val_ids).tag_samples(f"val_{str(seed)}")
@@ -438,6 +389,7 @@ def run_seeded_splits_and_TAG(dataset,
         # Add the new flights to the used list (even if 1 is a duplicate)
         used_flights_NC.extend(nc_candidates)
         seed_number = int(run * random.randint(1,100))
+        logger.success(f"SEED:{seed_number}")
         seeds_list.append(seed_number)
 
         ## WP
@@ -472,8 +424,8 @@ def run_seeded_splits_and_TAG(dataset,
             partitions_wp = partitions_wp,  
             wp_dict_stratify = dict_stratify_wp,
             flight_candidates = wp_candidates,
-            wp_train_size = wp_train_size,  # 80% of the remaining 90% (after test)
-            wp_val_size = wp_val_size,     # 20% of the remaining 90%
+            wp_train_size = wp_train_size,  # 85% of the remaining 90% (after test)
+            wp_val_size = wp_val_size,     # 15% of the remaining 90%
             wp_test_size = wp_test_size,
             seed=seed_number,
         )
@@ -533,7 +485,8 @@ def return_list_from_csv(csv_file):
 ## RANDOM PARTITION
 def random_choice_train_list(train_list,
                              seed,
-                             partitions:list=[0.1,0.25,0.5,0.75,1.0]
+                             subset_size,
+                             partitions:list=[0.05, 0.1,0.25,0.5,0.75,1.0]
                              ):
     """
     Select a randomly the paths files from the list
@@ -543,12 +496,16 @@ def random_choice_train_list(train_list,
     """
     length = len(train_list)
 
+    if subset_size is not None:
+        length  = subset_size
+
     ## seed 
     random.seed(seed)
 
     dict_out ={}
     for p in partitions:
         num_images = int(math.floor(length*p))
+        logger.info(f"Partition :{p} | size train: {num_images}")
         dict_out[f"partition_{str(int(p*100))}"] = random.choices(train_list, k=num_images)
     
     return dict_out
@@ -864,11 +821,12 @@ def active_learning_pipeline(
     partition_size: float,
     filename_image:str,
     output_dir_image:str ,
+    subset_size:int = None,
     ratio_cluster_uniqueness: float = 0.5,
     n_clusters: int = 10,
     temperature: float = 0.5,
     seed_number: int = 42,
-    buffer_percent:float = 0.2
+    buffer_percent:float = 0.05
     ):
     """
     Active Learning Pipeline:
@@ -882,6 +840,8 @@ def active_learning_pipeline(
         combined_indices (list): Final list of indices for FiftyOne selection.
     """
     total_samples = len(embeddings_norm)
+    if subset_size is not None:
+        total_samples = subset_size
     target_total_count = math.floor(partition_size * total_samples)
     
     logger.info(f"--- Starting Pipeline (Target Subset Size: {target_total_count}) ---")
@@ -894,7 +854,7 @@ def active_learning_pipeline(
     # budget_uniqueness = total_target * ratio (e.g. 500 = 1000 * 0.5)
     target_uniq_count = math.floor(target_total_count * ratio_cluster_uniqueness)
     
-    # Use your selector to find the best percentile threshold
+    # Use selector to find the best percentile threshold
     chosen_percentile = selector_num_uniqueness(
         partition_size=partition_size,
         wp_train_length=total_samples,
@@ -927,21 +887,31 @@ def active_learning_pipeline(
         embeddings_norm, 
         cluster_labels, 
         centroids, 
-        n_clusters, 
-        samples_per_cluster, 
+        n_clusters, # number of clusters 
+        samples_per_cluster, # how many samples per cluster
         temperature=temperature,
         seed=seed_number
     )
     
     # 6. Consolidate Indices
-    # We use a set to ensure no duplicates if a unique point is also a cluster medoid
-    overlap = len(set(uniqueness_indices) & set(kmeans_indices))
-    logger.info(f"Overlap between uniqueness and clustering: {overlap}")
+    ## IMPORTANT - IF CLAUDE, READ THIS
+    ## the combined indices that are being return from the function are being clip
+    ## randomly to fit the max number of samples for the partition. 
+    # E.g subset=1000, train_size=850, partition=0.1 -> return size of 85
+    # BUT the active learning ideal has a bit more sample since each cluster has a criterion
+    # of how many sample per clusters and  buffer percent, so the clip is done randomly
+    # which may affect that some good samples from important clusters are being cut-off 
     combined_indices = list(set(uniqueness_indices) | set(kmeans_indices))
+    
+    overlap = len(set(uniqueness_indices) & set(kmeans_indices))
+    logger.info(f"Overlap: {overlap} | Union size: {len(combined_indices)} | Target: {target_total_count}")
 
-    # Clip to target_total_count
-    combined_indices = combined_indices[:target_total_count]
-    logger.success(f"Final Consolidated Subset Size: {len(combined_indices)}")
+    if len(combined_indices) > target_total_count:
+        rng = random.Random(seed_number)
+        combined_indices = rng.sample(combined_indices, 
+                                      k=target_total_count).tolist()
+        logger.success(f"Clipped to {target_total_count} via random sampling")
+
 
 
     # Plot
@@ -950,14 +920,6 @@ def active_learning_pipeline(
     umap_coords = UMAP(n_components=2, random_state=seed_number, n_jobs=1 ).fit_transform(embeddings_norm)
     tsne_coords = TSNE(n_components=2, random_state=seed_number).fit_transform(embeddings_norm)
 
-    # plot_consolidated_landscape(
-    #     pca_coords, 
-    #     umap_coords, 
-    #     tsne_coords, 
-    #     uniqueness_indices, 
-    #     kmeans_indices,
-    #     title=f" Pipeline: {partition_size*100}% Partition \n Uniq: {len(uniqueness_indices)} | Clust: {len(kmeans_indices)})"
-    # )
 
     coords_list = [pca_coords, umap_coords, tsne_coords]
 
@@ -998,7 +960,7 @@ def argparse():
                         help='Where to store the plot of Active Learning selection')
     parse.add_argument('--num-clusters', type=int, default=13,
                                                                 help='Num of clusters to cluster the dataset.')
-    parse.add_argument('--ratio', type=float, default=0.33,
+    parse.add_argument('--ratio', type=float, default=0.25,
                        help='Ratio of uniqueness over clusters. If 0.5 so 1:1, if 0.33 so 1:2, which means two images of cluster for each one image of uniqueness.')
     parse.add_argument('--temperature', type=float,default=0.5, help= 'temperature-scaled Softmax distribution for selecting the samples closer to the cluster centroid.')
     return parse.parse_args()
@@ -1043,14 +1005,12 @@ def main():
     assert dataset._has_field(args.stratify_key), f"Field does not exist in the dataset. Please add it before run"
     assert len(dataset.distinct('tags'))==0, f"Dindt delete last tags"
 
-    PARTITIONS_ = np.array([0.05, 0.1, 0.25, 0.35, 0.5, 0.75, 0.90, 0.95, 1.0])
+    PARTITIONS_ = np.array([0.05, 0.1, 0.25, 0.5, 0.75, 1.0])
     # If a subset if given, so the whole pipeline process as a new size
     if args.subset_size is not None:
             wp_subset_size = int(args.subset_size) # e.g 1000
-            ratio_subset = (wp_subset_size / wp_true_size)
             # multiply the ratio by the partitions to retrieve the partition per subset
             partitions_wp_int = np.floor(PARTITIONS_*wp_subset_size).astype('int64')
-            PARTITIONS_NC = PARTITIONS_
             partitions_nc_int = np.floor(PARTITIONS_*nc_true_size).astype('int64')
             logger.info(f"SUBSET MODE | ON:")
             ##logger.info(f"old partitions:{PARTITIONS_}") #[0.05, 0.1, 0.25]
@@ -1081,7 +1041,8 @@ def main():
     logger.info(f"------ nNEXT STAGE")
 
     ## AT THIS POINT
-    ## THE FLIGHT MISSION IS NOT REDUCED YET, ALL FLIGHT MISSIONS FOR TRAIN WERE TAGGED
+    ## Val has been reduced to subset. Test has been reduced to subset. Train is full
+    ## ALL FLIGHT MISSIONS FOR TRAIN WERE TAGGED
     ## unless VAL and TEST,which is tagged by notin_test and test_
     ## therefore, the create csv with filepath contains all files on it. 
 
@@ -1136,7 +1097,8 @@ def main():
         ## create a dict containing the filepath_stem with the keys containig the filepath for images, labels and metadata
         dictt_random_choice = random_choice_train_list(train_list = wp_train_list,
                                             seed = seed_number,
-                                            partitions = PARTITIONS
+                                            subset_size = wp_subset_size,
+                                            partitions = PARTITIONS_
                                         )
         
 
@@ -1168,11 +1130,11 @@ def main():
         wp_train_emb_norm = normalize(wp_train_emb) #normalize 
 
         wp_train_ids = train_wp.values('filepath')
-        
+        logger.info(f"Active Pipeline,full train dataset size:{len(wp_train_ids)}")
         dict_actlr_full_filepath = {}
         output_actlr_tiles_filepath = {}
-        for partition in PARTITIONS:
-            if partition > 0.5:
+        for partition in PARTITIONS_:
+            if partition > 0.75:
                 pass
             else:
                 logger.info(f"Running partition:{partition}")
@@ -1180,6 +1142,7 @@ def main():
                 ## # Run the consolidate pipeline
                 final_al_indices = active_learning_pipeline(
                                         wp_train_emb_norm,
+                                        subset_size = wp_subset_size,
                                         partition_size= partition,            # partition
                                         ratio_cluster_uniqueness= args.ratio,   # 1:2 66% cluster and 33% uniqueness
                                         n_clusters= args.num_clusters,

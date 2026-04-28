@@ -700,21 +700,35 @@ def plot_uniqueness_to_ax(ax, uniqueness_scores):
     ax.legend()
 
 
-def plot_landscape_to_axes(axes, coords_list, labels, uniq_idx, km_idx):
+def plot_landscape_to_axes(axes, coords_list, labels, uniq_idx, km_idx, n_clusters):
     names = ["PCA", "UMAP", "t-SNE"]
+    cmap  = plt.cm.get_cmap("tab20", n_clusters)
+
     for i, ax in enumerate(axes):
         # Background: All potential candidates
         ax.scatter(coords_list[i][:, 0], 
                    coords_list[i][:, 1], 
-                   c='red', s=8, alpha=0.15)
+                   c=labels, 
+                   cmap=cmap, 
+                   vmin=0, 
+                   vmax=n_clusters-1,
+                   s=8, 
+                   alpha=0.2, 
+                   zorder=1
+                   )
+        
         
         # 1. Cluster Representatives (The "Diversity" picks)
         ax.scatter(coords_list[i][km_idx, 0], coords_list[i][km_idx, 1], 
-                   c='cyan', marker='o', s=35, edgecolor='black', linewidth=0.5)
+                    c=labels[km_idx], cmap=cmap, vmin=0, vmax=n_clusters-1,
+                   #c='cyan', 
+                   marker='o', s=35, edgecolor='black', linewidth=0.5, zorder=3)
         
         # 2. Uniqueness Outliers (The "Informative" picks)
         ax.scatter(coords_list[i][uniq_idx, 0], coords_list[i][uniq_idx, 1], 
-                   c='magenta', marker='*', s=80, edgecolor='black', linewidth=0.5)
+                   c='magenta', 
+                   marker='*', s=80, alpha=0.9, edgecolor='black', linewidth=0.5,
+                   zorder=4)
         
         ax.set_title(names[i], fontsize=12)
         ax.set_xticks([]); ax.set_yticks([]) # Clean look for manifolds
@@ -726,6 +740,7 @@ def save_consolidated_active_learning_report(uniqueness_scores,
                                             labels, 
                                             uniq_idx, 
                                             km_idx, 
+                                            n_clusters,
                                             partition_size:float,
                                             output_dir_image:str,
                                             filename="AL_Report.png"):
@@ -744,7 +759,7 @@ def save_consolidated_active_learning_report(uniqueness_scores,
 
     # --- BOTTOM ROW: Projections ---
     axes_bottom = [fig.add_subplot(gs[1, i]) for i in range(3)]
-    plot_landscape_to_axes(axes_bottom, coords_list, labels, uniq_idx, km_idx)
+    plot_landscape_to_axes(axes_bottom, coords_list, labels, uniq_idx, km_idx, n_clusters)
 
     # --- HEADER & METADATA ---
     fig.suptitle("Active Learning Selection Pipeline Report", fontsize=24, fontweight='bold', y=0.98)
@@ -764,12 +779,12 @@ def save_consolidated_active_learning_report(uniqueness_scores,
     # --- CUSTOM LEGEND ---
     # Create manual legend elements
     legend_elements = [
-        Line2D([0], [0], marker='o', color='w', label='K-Means (Cluster Medoids)',
-               markerfacecolor='cyan', markeredgecolor='black', markersize=10),
+        Line2D([0], [0], marker='o', color='w', label='K-Means (Cluster Representatives)',
+               markerfacecolor='gray', markeredgecolor='black', markersize=10),
         Line2D([0], [0], marker='*', color='w', label='Uniqueness (High-Density Outliers)',
-               markerfacecolor='magenta', markeredgecolor='black', markersize=15),
+               markerfacecolor='gray', markeredgecolor='black', markersize=15),
         Line2D([0], [0], marker='o', color='w', label='Unselected Manifold',
-               markerfacecolor='lightgrey', alpha=0.4, markersize=8)
+               markerfacecolor='gray', alpha=0.3, markersize=8)
     ]
     
     # Place legend centrally below the manifolds
@@ -816,6 +831,48 @@ def plot_consolidated_landscape(pca,
     plt.show()
 
 
+def get_stochastic_uniqueness_representatives(
+    uniqueness_scores: np.ndarray,
+    candidate_idx: np.ndarray,
+    target_count: int,
+    temperature_uniqueness: float = 0.5,
+    seed: int = 42
+) -> np.ndarray:
+    """
+    Stochastic sampling from the upper-tail uniqueness pool.
+    
+    Unlike a hard threshold selection, this applies a temperature-scaled
+    softmax over the candidate pool so higher-uniqueness samples are 
+    preferred but not deterministically chosen — spreading the selection
+    across the uniqueness manifold rather than clustering at the tip.
+
+    Args:
+        uniqueness_scores: Full uniqueness array, shape (N,).
+        candidate_idx: Indices of the upper-tail pool (from percentile gate).
+        target_count: Number of samples to select.
+        temperature_uniqueness: Controls spread within the upper tail.
+            - Low  (0.05): near-deterministic, picks highest scores → re-clusters.
+            - Med  (0.3-0.5): biased but spread, recommended.
+            - High (2.0+): near-uniform over upper tail.
+        seed: Random seed for reproducibility.
+
+    Returns:
+        np.ndarray: Selected indices into the original embeddings array.
+    """
+    rng = np.random.default_rng(seed)
+
+    candidate_scores = uniqueness_scores[candidate_idx]
+
+    # Softmax with +score (higher uniqueness = higher prob, opposite of kmeans distance)
+    weights = np.exp(candidate_scores / temperature_uniqueness)
+    probs   = weights / weights.sum()
+
+    n_to_pick = min(target_count, len(candidate_idx))
+    chosen    = rng.choice(len(candidate_idx), size=n_to_pick, replace=False, p=probs)
+
+    return candidate_idx[chosen]
+
+
 def active_learning_pipeline(
     embeddings_norm,
     partition_size: float,
@@ -825,6 +882,7 @@ def active_learning_pipeline(
     ratio_cluster_uniqueness: float = 0.5,
     n_clusters: int = 10,
     temperature: float = 0.5,
+    temperature_uniq: float = 0.5,
     seed_number: int = 42,
     buffer_percent:float = 0.05
     ):
@@ -864,8 +922,19 @@ def active_learning_pipeline(
     
     # Extract Uniqueness Indices
     threshold_value = np.percentile(uniqueness_scores, chosen_percentile)
-    uniqueness_indices = np.where(uniqueness_scores >= threshold_value)[0]
-    
+    candidate_idx   = np.where(uniqueness_scores >= threshold_value)[0]
+
+    # OLD
+    #uniqueness_indices = np.where(uniqueness_scores >= threshold_value)[0]
+    # NEW
+    # Stochastic sampling within upper-tail pool
+    uniqueness_indices = get_stochastic_uniqueness_representatives(
+        uniqueness_scores,
+        candidate_idx,
+        target_count=target_uniq_count,
+        temperature_uniqueness=temperature_uniq,
+        seed=seed_number
+    )
     # 3. Determine remaining budget for K-Means
     # We subtract what we actually got from uniqueness to fill the rest with clusters
     # we add a buffer here to avoid that this size is smaller than the target size
@@ -909,7 +978,7 @@ def active_learning_pipeline(
     if len(combined_indices) > target_total_count:
         rng = random.Random(seed_number)
         combined_indices = rng.sample(combined_indices, 
-                                      k=target_total_count).tolist()
+                                      k=target_total_count)
         logger.success(f"Clipped to {target_total_count} via random sampling")
 
 
@@ -929,6 +998,7 @@ def active_learning_pipeline(
         cluster_labels, 
         uniqueness_indices, 
         kmeans_indices,
+        n_clusters=n_clusters,
         partition_size = partition_size,
         filename= filename_image,
         output_dir_image = output_dir_image

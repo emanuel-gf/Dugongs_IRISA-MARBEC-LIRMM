@@ -832,6 +832,7 @@ def train(
     test_images,  test_labels,
     use_augmentation:bool,
     run_name: str,                              # unified ID for W&B + checkpoints
+    save_checkpoints: bool = True, 
     checkpoint: str     = "PekingU/rtdetr_r50vd",
     id2label: dict      = None,
     batch_size: int     = 8,
@@ -870,15 +871,18 @@ def train(
     logger.info(f"DataModule ready  "
                 f"(train={len(train_images)}  val={len(val_images)}  test={len(test_images)})")
  
-    ckpt_callback = ModelCheckpoint(
-        dirpath=ckpt_dir,
-        filename=f"{run_name}-{{epoch:02d}}-{{val/mAP_50:.4f}}",
-        monitor="val/mAP_50",   # ← best detector, not best loss
-        mode="max",             # ← higher is better
-        save_top_k=3,
-        save_last=False,
-        #every_n_epochs=10,
-    )
+    if save_checkpoints:
+        ckpt_callback = ModelCheckpoint(
+            dirpath=ckpt_dir,
+            filename=f"{run_name}-{{epoch:02d}}-{{val/mAP_50:.4f}}",
+            monitor="val/mAP_50",
+            mode="max",
+            save_top_k=3,
+            save_last=False,
+        )
+    else:
+        ckpt_callback = ModelCheckpoint(save_top_k=0)
+        logger.warning("Checkpoint saving DISABLED — no .ckpt files will be written.")
  
     wandb_logger = WandbLogger(
         project=wandb_project,
@@ -974,6 +978,9 @@ def parse_args():
                         help="After NC training, save weights locally to "
                              "<output-dir>/<run-name>/hf_export/ "
                              "(use the printed path as --nc-checkpoint-dir for partition runs)")
+    parser.add_argument("--no-save-checkpoints", action="store_true", default=False,
+                    help="Disable checkpoint saving — use for fine-tuning runs "
+                         "where only inference outputs matter.")
     return parser.parse_args()
 
 
@@ -1194,6 +1201,7 @@ def main():
         test_images=test_list_images,   test_labels=test_list_labels,
         use_augmentation = augmentation_flag,
         run_name=run_name,
+        save_checkpoints=not args.no_save_checkpoints,
         checkpoint=checkpoint,
         id2label={0: "dugong"},
         batch_size=args.batch_size,

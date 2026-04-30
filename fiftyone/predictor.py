@@ -252,7 +252,7 @@ def collect_filepath_fiftyone(dataset,
     dataset = fo.load_dataset("dugong")
 
     assert len(dataset) != f"Didnt find the dataset. Availables:{fo.list_datasets()}"
-    assert len(list(dataset.get_field_schema().keys())) > 40, f"Probably not loading the correct mongodb dataset."
+    assert len(list(dataset.get_field_schema().keys())) > 30, f"Probably not loading the correct mongodb dataset. Actualy length = :{len(list(dataset.get_field_schema().keys()))} | \n {list(dataset.get_field_schema().keys())}"
 
     wp_test_set = (dataset
                 .match_tags(tag_test_set)
@@ -281,7 +281,7 @@ def parse_args() -> argparse.Namespace:
     ## --fiftyone
     parser.add_argument('--dataset', type=str, help='name of the dataset')
     parser.add_argument('--tag-test', type=str, help='name of the tag present in the dataset')
-    parser.add_argument('--region', type=str)
+    parser.add_argument('--region', type=str, help='Which region to filter the dataset. Either WP or NC ')
     # --- images ---
     # src = parser.add_mutually_exclusive_group(required=True)
     # src.add_argument(
@@ -316,7 +316,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def get_run_name(checkpoint_path):
-    return Path(checkpoint_path).stem
+    return str(Path(checkpoint_path).parent.stem).strip()
 
 
 def get_files_by_stem(filepath_stem, patch_folder):
@@ -351,9 +351,10 @@ def main() -> None:
         checkpoint_dir=args.checkpoint_dir,
         device=args.device,
     )
+    print(f"OUtput dir:{args.output_dir}")
     
     run_name = get_run_name(args.checkpoint_dir)
-
+    run_name = str(run_name) + f'conf_{int(args.confidence*100)}'
     # 3. Run inference
     run_inference(
         image_filepaths=image_paths,

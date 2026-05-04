@@ -85,9 +85,37 @@ def load_model(
  
     checkpoint_dir = Path(checkpoint_dir)
     assert checkpoint_dir.exists(), f"Checkpoint dir not found: {checkpoint_dir}"
- 
+    
+    ## ----------------------
+     # ── verify checkpoint integrity before loading ────────────────────────
+    import json
+    import safetensors.torch as st
+
+    config_path = checkpoint_dir / "config.json"
+    assert config_path.exists(), f"config.json not found in {checkpoint_dir}"
+    with open(config_path) as f:
+        saved_config = json.load(f)
+    num_labels = saved_config.get("num_labels", -1)
+    assert num_labels == 1, \
+        f"CRITICAL: checkpoint config has num_labels={num_labels}, expected 1. " \
+        f"This checkpoint was saved incorrectly — do not use it."
+
+    safetensors_path = checkpoint_dir / "model.safetensors"
+    assert safetensors_path.exists(), f"model.safetensors not found in {checkpoint_dir}"
+    tensors = st.load_file(str(safetensors_path))
+    head_shape = tensors["model.enc_score_head.weight"].shape
+    assert head_shape[0] == 1, \
+        f"CRITICAL: saved head has {head_shape[0]} classes — expected 1. " \
+        f"Checkpoint is corrupted — re-run NC training with the fixed _save_local."
+    del tensors
+
+    print(f"Checkpoint verified — num_labels=1, head shape={head_shape}")
     print(f"Loading model from {checkpoint_dir}  (device={device})")
-    model     = RTDetrForObjectDetection.from_pretrained(str(checkpoint_dir))
+    ## --------------------
+    print(f"Loading model from {checkpoint_dir}  (device={device})")
+    model     = RTDetrForObjectDetection.from_pretrained(str(checkpoint_dir),
+                                                    ignore_mismatched_sizes=True
+                                                    )
     processor = RTDetrImageProcessor.from_pretrained(str(checkpoint_dir))
  
     model = model.to(device).eval()
@@ -354,13 +382,13 @@ def main() -> None:
     print(f"OUtput dir:{args.output_dir}")
     
     run_name = get_run_name(args.checkpoint_dir)
-    run_name = str(run_name) + f'conf_{int(args.confidence*100)}'
+    run_name = str(run_name) + f'_conf_{int(args.confidence*100)}'
     # 3. Run inference
     run_inference(
         image_filepaths=image_paths,
         model=model,
         processor=processor,
-        id2label={0: "dugong"},
+        id2label=id2label,
         confidence_threshold=args.confidence,
         output_dir=Path(os.path.join(args.output_dir,run_name)),
         device=args.device,

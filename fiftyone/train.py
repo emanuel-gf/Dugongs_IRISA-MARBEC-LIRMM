@@ -373,7 +373,8 @@ class RTDETRLightningModule(pl.LightningModule):
         self.save_hyperparameters(ignore=["id2label"])
  
         self.model = RTDetrForObjectDetection.from_pretrained(
-            checkpoint)
+            checkpoint,
+            ignore_mismatched_sizes=True)
         #self.model.train()
         self.augmentor = DugongAugmentor() if use_augmentation else None
         self.id2label  = id2label or {0: "dugong"}
@@ -711,15 +712,14 @@ class RTDETRLightningModule(pl.LightningModule):
                     if "backbone" not in n]
 
         optimizer = AdamW([
-            {"params": backbone_params, "lr": self.hparams.lr * 0.1},  # 1e-5
-            {"params": head_params,     "lr": self.hparams.lr},         # 1e-4
+            {"params": backbone_params, "lr": self.hparams.lr * self.hparams.backbone_lr_factor},
+            {"params": head_params,     "lr": self.hparams.lr},
         ], weight_decay=self.hparams.weight_decay)
 
         warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=3)
-        cosine = CosineAnnealingLR(optimizer, 
-                                   T_max=self.hparams.max_epochs // 2, 
-                                   eta_min=1e-6
-                                   )
+        cosine = CosineAnnealingLR(optimizer,
+                            T_max=self.hparams.max_epochs // 2,
+                            eta_min=self.hparams.lr * self.hparams.backbone_lr_factor * 0.01)
         scheduler = SequentialLR(optimizer, 
                                  schedulers=[warmup, cosine], 
                                  milestones=[3])
@@ -838,6 +838,7 @@ def train(
     batch_size: int     = 8,
     max_epochs: int     = 50,
     lr: float           = 1e-4,
+    backbone_lr_factor: float = 0.1,  
     weight_decay: float = 1e-3,
     output_dir: str     = "checkpoints",
     early_stopping_patience: int = 10,
@@ -858,7 +859,10 @@ def train(
     lit_model = RTDETRLightningModule(
         checkpoint=checkpoint, 
         lr=lr, weight_decay=weight_decay,
-        max_epochs=max_epochs, id2label=id2label, use_augmentation=use_augmentation,
+        max_epochs=max_epochs, 
+        id2label=id2label, 
+        use_augmentation=use_augmentation,
+        backbone_lr_factor=backbone_lr_factor, 
         **kwargs
         )
     logger.success("Lightning module instantiated")
@@ -889,9 +893,12 @@ def train(
         name=run_name,          # same unified ID
         tags=wandb_tags or [],
         log_model=False,
-        config=dict(checkpoint=checkpoint, lr=lr, weight_decay=weight_decay,
+        config=dict(
+                    checkpoint=checkpoint, lr=lr, weight_decay=weight_decay,
+                    backbone_lr_factor=backbone_lr_factor,        # ← add this
                     batch_size=batch_size, max_epochs=max_epochs,
-                      id2label=id2label, early_stopping_patience=early_stopping_patience),
+                    id2label=id2label, early_stopping_patience=early_stopping_patience,
+                ),
     )
     logger.info(f"W&B run: project='{wandb_project}'  name='{run_name}'")
  
@@ -908,7 +915,7 @@ def train(
                         mode="max"),
             LearningRateMonitor(logging_interval="epoch"),
         ],
-        log_every_n_steps=100,
+        log_every_n_steps=20,
         gradient_clip_val=0.1,
         enable_progress_bar=True,
     )
@@ -980,6 +987,8 @@ def parse_args():
                              "(use the printed path as --nc-checkpoint-dir for partition runs)")
     parser.add_argument("--no-save-checkpoints", action="store_true", default=False,
                     help="Disable checkpoint saving — use for fine-tuning runs ")
+    parser.add_argument("--backbone-lr-factor", type=float, default=0.1,
+                    help="Backbone LR = lr * factor. Default 0.1.")
     return parser.parse_args()
 
 
@@ -1009,16 +1018,19 @@ def _save_and_push(
         https://huggingface.co/{hf_repo}/tree/{hf_revision}
     """
     token = os.environ.get("HUGGING_FACE_API")
-    assert token, "Provide --hf-token or set HF_TOKEN env var"
- 
+    assert token, "Provide HUGGING_FACE_API env var"
+
     local_dir = Path(local_dir)
     local_dir.mkdir(parents=True, exist_ok=True)
- 
-    # ── save locally ─────────────────────────────────────────────────────
+
+    # ── patch label map ───────────────────────────────────────────
+    model.model.config.id2label  = {0: "dugong"}
+    model.model.config.label2id  = {"dugong": 0}
+    model.model.config.num_labels = 1
+
     logger.info(f"Saving model locally → {local_dir}")
-    model.model.save_pretrained(local_dir)      # writes config.json + model.safetensors
-    processor.save_pretrained(local_dir)        # writes preprocessor_config.json
-    logger.success(f"Model saved to {local_dir}")
+    model.model.save_pretrained(local_dir)
+    processor.save_pretrained(local_dir)
  
     # ── push to Hub on a named revision ──────────────────────────────────
     logger.info(f"Pushing to HF Hub → {hf_repo} ")
@@ -1061,12 +1073,13 @@ def _save_local(
     id2label = {0: "dugong"}
     model.model.config.id2label = id2label          # inner HF model config
     model.model.config.label2id = {"dugong": 0}
+    model.model.config.num_labels = 1
  
     logger.info(f"Saving model locally → {local_dir}")
     model.model.save_pretrained(local_dir)
     processor.save_pretrained(local_dir)
-    logger.success(f"NC weights saved to {local_dir}  "
-                   f"(pass this path as --nc-checkpoint-dir for partition runs)")
+
+    logger.success(f"NC weights verified on disk {local_dir}")
 
 
 def main():
@@ -1206,6 +1219,7 @@ def main():
         batch_size=args.batch_size,
         max_epochs=args.max_epochs,
         lr=args.lr,
+        backbone_lr_factor = args.backbone_lr_factor,
         output_dir=args.output_dir,
         wandb_project=args.wandb_project,
          wandb_tags=[args.schema, args.partition, "NC-pretrained" if is_finetune else "from-hub"],

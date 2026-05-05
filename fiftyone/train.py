@@ -374,7 +374,16 @@ class RTDETRLightningModule(pl.LightningModule):
  
         self.model = RTDetrForObjectDetection.from_pretrained(
             checkpoint,
-            ignore_mismatched_sizes=True)
+            ignore_mismatched_sizes=True,
+                num_labels=1,
+                id2label={0: "dugong"},
+                label2id={"dugong": 0}
+                )
+        # logger if it was initialized properly
+        logger.info(
+            f"Model head shape: {self.model.model.enc_score_head.weight.shape} "
+            f"— expected [1, 256]"
+        )
         #self.model.train()
         self.augmentor = DugongAugmentor() if use_augmentation else None
         self.id2label  = id2label or {0: "dugong"}
@@ -865,6 +874,7 @@ def train(
         backbone_lr_factor=backbone_lr_factor, 
         **kwargs
         )
+    
     logger.success("Lightning module instantiated")
  
     data_module = DugongDataModule(
@@ -1050,7 +1060,7 @@ def _save_and_push(
     )
     
 
-# Save locally only (no HF push)
+
 def _save_local(
     model: RTDETRLightningModule,
     processor: RTDetrImageProcessor,
@@ -1069,15 +1079,11 @@ def _save_local(
     local_dir = Path(local_dir)
     local_dir.mkdir(parents=True, exist_ok=True)
 
-     # ── patch the label map before saving ─────────────────────────────────
-    id2label = {0: "dugong"}
-    model.model.config.id2label = id2label          # inner HF model config
-    model.model.config.label2id = {"dugong": 0}
-    model.model.config.num_labels = 1
- 
+     # 
     logger.info(f"Saving model locally → {local_dir}")
     model.model.save_pretrained(local_dir)
     processor.save_pretrained(local_dir)
+    logger.success(f"NC weights saved to {local_dir}")
 
     logger.success(f"NC weights verified on disk {local_dir}")
 

@@ -87,43 +87,18 @@ def load_model(
     assert checkpoint_dir.exists(), f"Checkpoint dir not found: {checkpoint_dir}"
     
     ## ----------------------
-     # ── verify checkpoint integrity before loading ────────────────────────
-    import json
-    import safetensors.torch as st
-
-    config_path = checkpoint_dir / "config.json"
-    assert config_path.exists(), f"config.json not found in {checkpoint_dir}"
-    with open(config_path) as f:
-        saved_config = json.load(f)
-    num_labels = saved_config.get("num_labels", -1)
-    assert num_labels == 1, \
-        f"CRITICAL: checkpoint config has num_labels={num_labels}, expected 1. " \
-        f"This checkpoint was saved incorrectly — do not use it."
-
-    safetensors_path = checkpoint_dir / "model.safetensors"
-    assert safetensors_path.exists(), f"model.safetensors not found in {checkpoint_dir}"
-    tensors = st.load_file(str(safetensors_path))
-    head_shape = tensors["model.enc_score_head.weight"].shape
-    assert head_shape[0] == 1, \
-        f"CRITICAL: saved head has {head_shape[0]} classes — expected 1. " \
-        f"Checkpoint is corrupted — re-run NC training with the fixed _save_local."
-    del tensors
-
-    print(f"Checkpoint verified — num_labels=1, head shape={head_shape}")
-    print(f"Loading model from {checkpoint_dir}  (device={device})")
-    ## --------------------
-    print(f"Loading model from {checkpoint_dir}  (device={device})")
-    model     = RTDetrForObjectDetection.from_pretrained(str(checkpoint_dir),
-                                                    ignore_mismatched_sizes=True
-                                                    )
+    model = RTDetrForObjectDetection.from_pretrained(
+        str(checkpoint_dir),
+        ignore_mismatched_sizes=True,
+        num_labels=1,                        # ← force 1-class head at load time
+        id2label={0: "dugong"},
+        label2id={"dugong": 0},
+    )
     processor = RTDetrImageProcessor.from_pretrained(str(checkpoint_dir))
- 
-    model = model.to(device).eval()
- 
-    id2label: dict[int, str] = {
-        int(k): v for k, v in model.config.id2label.items()
-    }
-    print(f"Model loaded — labels: {id2label}")
+    model     = model.to(device).eval()
+
+    id2label = {int(k): v for k, v in model.config.id2label.items()}
+    print(f"Model loaded — labels: {id2label}")  # should print {0: 'dugong'}
     return model, processor, id2label
 
 

@@ -166,7 +166,7 @@ class DugongDataset(Dataset):
                     abs_h = h * img_h
 
                     annotations.append({
-                        "category_id": int(cls_id),
+                        "category_id": 0,
                         "bbox": [x_min, y_min, abs_w, abs_h], ## COCO ABSOLUTE PIXELS
                         "area": abs_w * abs_h,
                         "iscrowd": 0,
@@ -346,6 +346,8 @@ class DugongAugmentor(nn.Module):
         return torch.stack([x1, y1, x2, y2], dim=-1)
     
 # ─────────────────────────────────────────────
+
+
 # Lightning Module
 class RTDETRLightningModule(pl.LightningModule):
     """
@@ -373,17 +375,22 @@ class RTDETRLightningModule(pl.LightningModule):
         self.save_hyperparameters(ignore=["id2label"])
  
         self.model = RTDetrForObjectDetection.from_pretrained(
-            checkpoint,
-            ignore_mismatched_sizes=True,
-                num_labels=1,
-                id2label={0: "dugong"},
-                label2id={"dugong": 0}
+            checkpoint
                 )
         # logger if it was initialized properly
         logger.info(
             f"Model head shape: {self.model.model.enc_score_head.weight.shape} "
-            f"— expected [1, 256]"
         )
+
+        ## dont save as a 1-class model.
+        # Add dugong to the label map — preserves all 80 COCO classes
+        self.model.config.id2label[0]= "dugong"
+        self.model.config.label2id["dugong"] = 0
+
+        # Verify head shape — should be [80, 256] 
+        head_shape = self.model.model.enc_score_head.weight.shape
+        logger.info(f"Model loaded — head shape: {head_shape} | labels: {self.model.config.num_labels}")
+        
         #self.model.train()
         self.augmentor = DugongAugmentor() if use_augmentation else None
         self.id2label  = id2label or {0: "dugong"}
@@ -433,61 +440,9 @@ class RTDETRLightningModule(pl.LightningModule):
         ## return outputs.loss, outputs.loss_dict
         return outputs, labels
     
-    # def _collect_map_inputs(self, outputs, labels, confidence_threshold
-    #                         ):
-    #     """
-    #     Convert raw RT-DETR outputs + ground-truth labels into the
-    #     list-of-dicts format that torchmetrics MeanAveragePrecision expects.
-
-    #     torchmetrics preds format (one dict per image):
-    #         boxes  : (M, 4) xyxy  absolute pixels  — FloatTensor
-    #         scores : (M,)                           — FloatTensor
-    #         labels : (M,)                           — IntTensor
-
-    #     torchmetrics targets format (one dict per image):
-    #         boxes  : (N, 4) xyxy  absolute pixels  — FloatTensor
-    #         labels : (N,)                           — IntTensor
-    #     """
-    #     # logits: (B, num_queries, num_classes)
-    #     # pred_boxes: (B, num_queries, 4) cxcywh normalised
-    #     scores_all = outputs.logits.sigmoid()           # (B, Q, C)
-    #     boxes_all  = outputs.pred_boxes                 # (B, Q, 4) cxcywh norm
-
-    #     preds   = []
-    #     targets = []
-
-    #     for i, lbl in enumerate(labels):
-    #         # ── image size from label (stored by processor as [h, w]) ──
-    #         h, w = lbl["orig_size"].tolist()
-
-    #         # ── predictions ──────────────────────────────────────────
-    #         scores_i, classes_i = scores_all[i].max(dim=-1)   # (Q,), (Q,)
-    #         keep = scores_i > confidence_threshold
-
-    #         boxes_norm  = boxes_all[i][keep]                   # (M, 4) cxcywh norm
-    #         boxes_xyxy  = _cxcywh_to_xyxy(boxes_norm)          # (M, 4) xyxy norm
-    #         scale       = boxes_norm.new_tensor([w, h, w, h])
-    #         boxes_abs   = (boxes_xyxy * scale).clamp(0)        # (M, 4) xyxy abs pixels
-
-    #         preds.append({
-    #             "boxes":  boxes_abs.cpu(),
-    #             "scores": scores_i[keep].cpu(),
-    #             "labels": classes_i[keep].int().cpu(),
-    #         })
-
-    #         # ── ground truth ─────────────────────────────────────────
-    #         gt_boxes_norm = lbl["boxes"]                        # (N, 4) cxcywh norm
-    #         gt_boxes_abs  = (_cxcywh_to_xyxy(gt_boxes_norm) * scale).clamp(0)
-
-    #         targets.append({
-    #             "boxes":  gt_boxes_abs.cpu(),
-    #             "labels": lbl["class_labels"].int().cpu(),
-    #         })
-
-    #     return preds, targets
 
     def _collect_map_inputs(self, outputs, labels, confidence_threshold=0.01):
-        scores_all = outputs.logits.sigmoid()
+        scores_all = outputs.logits.sigmoid()   # (B, Q, 80)
         boxes_all  = outputs.pred_boxes
 
         preds, targets = [], []
@@ -496,22 +451,21 @@ class RTDETRLightningModule(pl.LightningModule):
             h, w = lbl["orig_size"].tolist()
             scale = boxes_all.new_tensor([w, h, w, h])
 
-            scores_i, classes_i = scores_all[i].max(dim=-1)
-
-            # low guard only — drops near-zero noise, doesn't truncate the PR curve
-            keep = scores_i > 0.01
+            # ── only look at dugong scores (class index 80) ──────────────
+            dugong_scores = scores_all[i, :, 0]        # (Q,) — dugong only
+            keep = dugong_scores > confidence_threshold
             boxes_abs = (_cxcywh_to_xyxy(boxes_all[i]) * scale).clamp(0)
 
             preds.append({
                 "boxes":  boxes_abs[keep].cpu(),
-                "scores": scores_i[keep].cpu(),
-                "labels": classes_i[keep].int().cpu(),
+                "scores": dugong_scores[keep].cpu(),
+                "labels": torch.zeros(keep.sum(), dtype=torch.int),  # remap to 0 for mAP
             })
 
             gt_boxes_abs = (_cxcywh_to_xyxy(lbl["boxes"]) * scale).clamp(0)
             targets.append({
                 "boxes":  gt_boxes_abs.cpu(),
-                "labels": lbl["class_labels"].int().cpu(),
+                "labels": torch.zeros(len(lbl["boxes"]), dtype=torch.int),  # GT also 0 for mAP
             })
 
         return preds, targets
@@ -803,10 +757,15 @@ def run_inference(
         outputs = model(pixel_values=inputs["pixel_values"].to(device))
  
         preds = processor.post_process_object_detection(
-            outputs, target_sizes=[(h_img, w_img)], threshold=confidence_threshold)[0]
+            outputs, 
+            target_sizes=[(h_img, w_img)], 
+            threshold=confidence_threshold)[0]
  
         detections = []
         for score, label_id, box in zip(preds["scores"], preds["labels"], preds["boxes"]):
+            ## only keep doguong predictions
+            if label_id.item() != 0:
+                continue
             x1, y1, x2, y2 = box.tolist()
             detections.append({
                 "label":        id2label.get(label_id.item(), str(label_id.item())),
@@ -1080,12 +1039,21 @@ def _save_local(
     local_dir.mkdir(parents=True, exist_ok=True)
 
      # 
-    logger.info(f"Saving model locally → {local_dir}")
+    logger.info(f"Saving model locally > {local_dir}")
     model.model.save_pretrained(local_dir)
     processor.save_pretrained(local_dir)
-    logger.success(f"NC weights saved to {local_dir}")
 
-    logger.success(f"NC weights verified on disk {local_dir}")
+    # Verify — head should be [80, 256], config should have dugong at key 80
+    import safetensors.torch as st
+    import json as json_module
+    tensors    = st.load_file(str(local_dir / "model.safetensors"))
+    head_shape = tensors["model.enc_score_head.weight"].shape
+    assert head_shape[0] == 80, f"CRITICAL: saved head has {head_shape[0]} rows — expected 80"
+    with open(local_dir / "config.json") as f:
+        cfg = json_module.load(f)
+    assert "0" in cfg.get("id2label", {}), "CRITICAL: dugong not found at key 0 in saved config.json"
+    logger.success(f"NC weights saved and verified — head={head_shape}, dugong at class 0 → {local_dir}")
+    del tensors
 
 
 def main():

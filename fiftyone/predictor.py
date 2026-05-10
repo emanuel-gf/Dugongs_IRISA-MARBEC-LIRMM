@@ -88,11 +88,7 @@ def load_model(
     
     ## ----------------------
     model = RTDetrForObjectDetection.from_pretrained(
-        str(checkpoint_dir),
-        ignore_mismatched_sizes=True,
-        num_labels=1,                        # ← force 1-class head at load time
-        id2label={0: "dugong"},
-        label2id={"dugong": 0},
+        str(checkpoint_dir)
     )
     processor = RTDetrImageProcessor.from_pretrained(str(checkpoint_dir))
     model     = model.to(device).eval()
@@ -149,7 +145,7 @@ def run_inference(
  
         detections = [
             {
-                "label":        id2label.get(label_id.item(), str(label_id.item())),
+                "label":  "dugong",
                 "bounding_box": [
                     x1 / w_img,
                     y1 / h_img,
@@ -162,6 +158,7 @@ def run_inference(
                 preds["scores"], preds["labels"],
                 [b.tolist() for b in preds["boxes"]]
             )
+            if label_id.item() == 0
         ]
  
         record: dict = {"filepath": str(path.resolve()), "detections": detections}
@@ -354,6 +351,7 @@ def main() -> None:
         checkpoint_dir=args.checkpoint_dir,
         device=args.device,
     )
+
     print(f"OUtput dir:{args.output_dir}")
     
     run_name = get_run_name(args.checkpoint_dir)

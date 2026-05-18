@@ -368,7 +368,7 @@ class RTDETRLightningModule(pl.LightningModule):
         id2label: dict | None = None,
         use_augmentation = False,
         early_stopping_patience: int = 10,
-        confidence_threshold = 0.3,
+        confidence_threshold = 0.01,
          **kwargs
     ):
         super().__init__()

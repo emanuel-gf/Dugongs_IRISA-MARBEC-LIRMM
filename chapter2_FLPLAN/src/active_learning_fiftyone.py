@@ -249,7 +249,7 @@ def compute_clustering_representativeness(
     **kmeans_kwargs,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list]:
     """
-    Run KMeans clustering on embeddings and store cluster labels per sample.
+    Run KMeans clustering on embeddings and store cluster labels per sample. The embeddings are L2 normalized .
 
     Parameters
     ----------

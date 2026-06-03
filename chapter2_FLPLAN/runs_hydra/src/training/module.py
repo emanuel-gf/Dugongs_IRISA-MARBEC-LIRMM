@@ -56,20 +56,22 @@ class DetectorLightningModule(pl.LightningModule):
     cfg      : Hydra DictConfig with training.* and logging.* sections
     """
 
-    def __init__(self, adapter: BaseDetectorAdapter, cfg):
+    def __init__(self, adapter: BaseDetectorAdapter, cfg,                  inference_dir=None):
         super().__init__()
         self.adapter = adapter
         self.cfg     = cfg
+        self.inference_dir = inference_dir
 
         # REGISTER ADAPATER MODEL 
         self.model = adapter.model
         
         # Save hyperparameters (excluding non-serialisable objects)
-        self.save_hyperparameters(ignore=["adapter"])
+        self.save_hyperparameters(ignore=["adapter","cfg","inference_dir"])
 
         self._first_batch_logged = cfg.get("logging.first_batch_log",False)
-        
-        # ── mAP — one object per split, accumulates across batches ────────
+        self._test_predictions: list[dict] = []
+
+        # ── mAP — one object per split, accumulates across batches 
         map_kwargs = dict(
             iou_type="bbox",
             box_format="xyxy",
@@ -79,12 +81,12 @@ class DetectorLightningModule(pl.LightningModule):
         self.val_map  = MeanAveragePrecision(**map_kwargs)
         self.test_map = MeanAveragePrecision(**map_kwargs)
 
-    # ── forward ───────────────────────────────────────────────────────────
+    #  forward 
 
     def forward(self, batch):
         return self.adapter.forward(batch)
 
-    # ── training ──────────────────────────────────────────────────────────
+    #  training 
 
     def on_train_epoch_start(self):
         self.adapter.train()
@@ -123,16 +125,42 @@ class DetectorLightningModule(pl.LightningModule):
         self._log_map_breakdown("val", result)
         self.val_map.reset()
 
-    # ── test ──────────────────────────────────────────────────────────────
-
+    # ── test
     def test_step(self, batch, batch_idx):
         outputs = self(batch)
         self._log_losses("test", outputs.loss, outputs.loss_dict)
-
-        with torch.no_grad():
-            preds, targets = self._collect_map_inputs(outputs, batch["labels"])
+        preds, targets = self._collect_map_inputs(outputs, batch["labels"])
         self.test_map.update(preds, targets)
-
+ 
+        # Accumulate predictions for JSON export
+        filepaths = batch.get("filepaths", [""] * len(batch["labels"]))
+        metadata  = batch.get("metadata",  [{}]  * len(batch["labels"]))
+        thr       = self.cfg.model.confidence_threshold
+ 
+        scores_all = outputs.logits.sigmoid()   # (B, Q, 80)
+        boxes_all  = outputs.pred_boxes          # (B, Q, 4) normalised cxcywh
+ 
+        for i in range(len(batch["labels"])):
+            dugong_scores = scores_all[i, :, 0]
+            keep          = dugong_scores > thr
+ 
+            detections = []
+            for box, score in zip(
+                boxes_all[i][keep].cpu().tolist(),
+                dugong_scores[keep].cpu().tolist(),
+            ):
+                detections.append({
+                    "label":        "dugong",
+                    "bounding_box": box,          # [cx, cy, w, h] normalised
+                    "confidence":   round(score, 6),
+                })
+ 
+            self._test_predictions.append({
+                "filepath":      filepaths[i],
+                "detections":    detections,
+                "tile_metadata": metadata[i],
+            })
+ 
         return outputs.loss
 
     def on_test_epoch_end(self):
@@ -142,6 +170,21 @@ class DetectorLightningModule(pl.LightningModule):
         self.log("test/mAP_75", result["map_75"], sync_dist=False)
         self._log_map_breakdown("test", result)
         self.test_map.reset()
+ 
+        # ── Write predictions JSON ────────────────────────────────────────
+        if self._test_predictions and self.inference_dir:
+            import json
+            from pathlib import Path
+            out_dir = Path(self.inference_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"{self.cfg.run_name}_test_predictions.json"
+            with open(out_path, "w") as f:
+                json.dump(self._test_predictions, f, indent=2)
+            import logging
+            logging.getLogger(__name__).info(
+                f"Saved {len(self._test_predictions)} test predictions → {out_path}"
+            )
+        self._test_predictions = []   # reset for potential re-use
 
     # ── optimizer & scheduler ─────────────────────────────────────────────
 
@@ -296,3 +339,7 @@ class DetectorLightningModule(pl.LightningModule):
                 f"box=[{box[0]:.3f},{box[1]:.3f},{box[2]:.3f},{box[3]:.3f}]"
             )
         log.debug("─" * 60)
+
+    def set_inference_dir(self, inference_dir) -> None:
+        """Enable or disable prediction JSON export. Pass None to disable."""
+        self.inference_dir = inference_dir

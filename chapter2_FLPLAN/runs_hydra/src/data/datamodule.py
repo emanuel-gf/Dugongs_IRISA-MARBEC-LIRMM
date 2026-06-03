@@ -94,6 +94,7 @@ class DugongDataset(Dataset):
         label_filepaths: list,
         processor: AutoImageProcessor,
         augmentor=None,
+        metadata_list: list | None = None
     ):
         self.image_filepaths = [Path(p) for p in sorted(image_filepaths)]
         self.label_filepaths = [Path(p) for p in sorted(label_filepaths)]
@@ -105,6 +106,10 @@ class DugongDataset(Dataset):
 
         self.processor = processor
         self.augmentor = augmentor
+
+        # metadata_list: one dict per image with tile geometry (x_start, y_start,)
+        # Indices are sorted in parallel with image_filepaths.
+        self.metadata_list = metadata_list or [{}] * len(self.image_filepaths)
 
     def __len__(self) -> int:
         return len(self.image_filepaths)
@@ -203,7 +208,7 @@ class DugongDataset(Dataset):
             "iscrowd": torch.zeros(num_boxes, dtype=torch.int64),
         }
 
-        return pixel_values, labels
+        return pixel_values, labels, str(image_path), self.metadata_list[idx]
 
 
 # ── Collate ───────────────────────────────────────────────────────────────────
@@ -212,6 +217,8 @@ def collate_fn(batch):
     return {
         "pixel_values": torch.stack([item[0] for item in batch]),
         "labels":       [item[1] for item in batch],
+        "filepaths":    [item[2] for item in batch],
+        "metadata":     [item[3] for item in batch],
     }
 
 
@@ -304,15 +311,19 @@ class DugongDataModule(pl.LightningDataModule):
 
         train_images = train_data["images"]
         train_labels = train_data["labels"]
+        train_metadata  = train_data.get("metadata", [{}] * len(train_images))
 
         # ── Val / test paths ──────────────────────────────────────────────
         val_data  = seed_data["val"]
         test_data = seed_data["test"]
 
-        val_images  = val_data["images"]
-        val_labels  = val_data["labels"]
-        test_images = test_data["images"]
-        test_labels = test_data["labels"]
+
+        val_images    = val_data["images"]
+        val_labels    = val_data["labels"]
+        val_metadata  = val_data.get("metadata", [{}] * len(val_images))
+        test_images   = test_data["images"]
+        test_labels   = test_data["labels"]
+        test_metadata = test_data.get("metadata", [{}] * len(test_images))
 
         # Validate counts
         assert len(train_images) == len(train_labels), (
@@ -347,12 +358,14 @@ class DugongDataModule(pl.LightningDataModule):
             self.val_dataset = DugongDataset(
                 val_images, val_labels,
                 self.processor, augmentor=None,
+                metadata_list=val_metadata,
             )
-
+ 
         if stage in ("test", None):
             self.test_dataset = DugongDataset(
                 test_images, test_labels,
                 self.processor, augmentor=None,   # never augment test
+                metadata_list=test_metadata,
             )
 
     # ── DataLoaders ───────────────────────────────────────────────────────

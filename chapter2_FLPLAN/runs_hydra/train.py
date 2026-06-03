@@ -116,7 +116,7 @@ def main(cfg: DictConfig) -> None:
     log.info(f"Adapter built: {cfg.model.name}")
 
     # ── 5. Lightning module ───────────────────────────────────────────────
-    module = DetectorLightningModule(adapter=adapter, cfg=cfg)
+    module = DetectorLightningModule(adapter=adapter, cfg=cfg, inference_dir=None) #this is none because of the zero-shot when initializing. 
 
     # ── 6. Processor + augmentor + DataModule ─────────────────────────────
     augmentor = _build_augmentor(cfg)
@@ -186,6 +186,8 @@ def main(cfg: DictConfig) -> None:
     log.info(f"Training complete in {elapsed:.1f}s")
 
     # ── 10. Test on best checkpoint ───────────────────────────────────────
+    if cfg.get("save_test_predictions", True):
+        module.set_inference_dir(cfg.paths.inference_dir)
     log.info("Running test on best checkpoint …")
     trainer.test(module, datamodule=datamodule, ckpt_path="best", weights_only=False)
 

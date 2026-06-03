@@ -51,7 +51,7 @@ def build_logger(cfg) -> pl.loggers.Logger:
     run_name = cfg.run_name
 
     if not log_cfg.enabled:
-        save_dir = Path(cfg.paths.log_dir) / "csv"
+        save_dir = Path(cfg.paths.log_dir) / f"S{cfg.seed}_{cfg.schema}_{cfg.partition}_{cfg.method}"
         save_dir.mkdir(parents=True, exist_ok=True)
         print(f"  [logger] W&B disabled — writing CSV logs to {save_dir}/{run_name}")
         return pl.loggers.CSVLogger(

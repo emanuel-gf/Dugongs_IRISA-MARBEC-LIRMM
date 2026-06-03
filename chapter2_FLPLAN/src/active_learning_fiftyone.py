@@ -235,7 +235,188 @@ def compute_uniqueness_field(
  
     return weighted_dists, sample_ids
 
+## Version 2 with uniqueness within  a given cluster
+def compute_uniqueness_field_v2(
+    dataset,
+    embeddings_field:  str   = "full_embeddings",
+    uniqueness_field:  str   = "uniqueness_score",
+    cluster_field:     str   = None,   # if given, compute uniqueness per cluster
+    k:                 int   = 10,
+    decay:             str   = "exponential",
+    decay_param:       float = 0.5,
+    custom_weights:    list  = None,
+    save:              bool  = True,
+    verbose:           bool  = True,
+) -> tuple[np.ndarray, list]:
+    """
+    Compute weighted kNN uniqueness scores and optionally store in the dataset.
 
+    If cluster_field is provided, uniqueness is computed independently within
+    each cluster — kNN neighbours are restricted to samples in the same cluster.
+    This measures "how unique is this sample among its visual peers" rather than
+    global isolation, which avoids large dense clusters suppressing the scores
+    of smaller clusters globally.
+
+    If cluster_field is None, standard global uniqueness is computed.
+
+    Parameters
+    ----------
+    dataset          : FiftyOne dataset or view
+    embeddings_field : field containing pre-computed embeddings
+    uniqueness_field : field name to write the scores to
+    cluster_field    : optional field containing integer cluster labels
+                       (e.g. "cluster_label" from compute_clustering).
+                       If given, kNN is run per-cluster.
+    k                : number of neighbours within the cluster (or globally).
+    decay            : "exponential", "linear", "power"
+    decay_param      : lambda for exponential, p for power, unused for linear
+    custom_weights   : optional manual weight list of length k
+    save             : write scores back to dataset
+    verbose          : print progress and stats
+
+    Returns
+    -------
+    uniqueness_scores : np.ndarray (N,) — normalised [0,1]
+    sample_ids        : list of N sample IDs (same order)
+    """
+    embeddings_norm, sample_ids = _load_embeddings(dataset, embeddings_field, verbose)
+    N = len(embeddings_norm)
+
+    # ── Build weights ─────────────────────────────────────────────────────────
+    if custom_weights is not None:
+        if len(custom_weights) != k:
+            raise ValueError(
+                f"len(custom_weights)={len(custom_weights)} must equal k={k}."
+            )
+        weights = np.array(custom_weights, dtype=np.float64)
+        _log(f"Using custom weights: {weights.tolist()}", verbose)
+    else:
+        weights = compute_decay_weights(k, decay, decay_param)
+        _log(
+            f"Decay: {decay}  param={decay_param}  k={k}  "
+            f"weights=[{', '.join(f'{w:.3f}' for w in weights)}]",
+            verbose,
+        )
+    weights = weights / weights.sum()
+
+    weighted_dists = np.zeros(N, dtype=np.float64)
+
+    # ── Per-cluster or global ─────────────────────────────────────────────────
+    if cluster_field is not None:
+        # Load cluster labels aligned to sample_ids
+        _log(f"Loading cluster labels from '{cluster_field}' ...", verbose)
+        id_to_idx     = {sid: i for i, sid in enumerate(sample_ids)}
+        cluster_labels = np.full(N, -1, dtype=int)
+
+        for sample in dataset.iter_samples(progress=verbose):
+            idx = id_to_idx.get(sample.id)
+            if idx is None:
+                continue
+            label = sample.get_field(cluster_field)
+            if label is not None:
+                cluster_labels[idx] = int(label)
+
+        unique_clusters = np.unique(cluster_labels[cluster_labels >= 0])
+        _log(f"Found {len(unique_clusters)} clusters.", verbose)
+
+        for cluster_id in unique_clusters:
+            cluster_idx = np.where(cluster_labels == cluster_id)[0]
+            n_in_cluster = len(cluster_idx)
+
+            if n_in_cluster < 2:
+                # Only one sample — uniqueness is undefined, set to 1.0
+                # (it is maximally unique within its cluster by definition)
+                weighted_dists[cluster_idx] = 1.0
+                continue
+
+            # Clamp k to cluster size — can't have more neighbours than members
+            k_eff = min(k, n_in_cluster - 1)
+
+            k_max_recommended = int(math.sqrt(n_in_cluster))
+            if k_eff >= k_max_recommended and verbose:
+                _log(
+                    f"  cluster {cluster_id}: k_eff={k_eff} >= "
+                    f"sqrt({n_in_cluster})={k_max_recommended}. "
+                    f"Consider reducing k.",
+                    verbose, level="warn",
+                )
+
+            # Recompute weights for this k_eff (in case k was clamped)
+            if k_eff < k:
+                w_local = compute_decay_weights(k_eff, decay, decay_param)
+                w_local = w_local / w_local.sum()
+            else:
+                w_local = weights
+
+            sub_embs = embeddings_norm[cluster_idx]   # (n_in_cluster, D)
+
+            knn = NearestNeighbors(
+                n_neighbors=k_eff + 1, metric="cosine", n_jobs=-1
+            )
+            knn.fit(sub_embs)
+            distances, _ = knn.kneighbors(sub_embs)
+
+            relevant_dists = distances[:, 1:]          # (n_in_cluster, k_eff)
+            scores         = (relevant_dists * w_local).sum(axis=1)
+
+            # Normalise within cluster to [0,1]
+            max_val = scores.max()
+            if max_val > 0:
+                scores /= max_val
+
+            weighted_dists[cluster_idx] = scores
+
+            _log(
+                f"  cluster {cluster_id:>3}: n={n_in_cluster:>4}  "
+                f"k_eff={k_eff}  "
+                f"mean={scores.mean():.4f}  max={scores.max():.4f}",
+                verbose,
+            )
+
+    else:
+        # ── Global uniqueness (original behaviour) ────────────────────────
+        k_max_recommended = int(math.sqrt(N))
+        if k >= k_max_recommended:
+            _log(
+                f"k={k} >= sqrt(N)={k_max_recommended}. "
+                f"Consider reducing k.",
+                verbose, level="warn",
+            )
+
+        _log(f"Fitting global kNN (k={k}, metric=cosine, N={N}) ...", verbose)
+        knn = NearestNeighbors(n_neighbors=k + 1, metric="cosine", n_jobs=-1)
+        knn.fit(embeddings_norm)
+        distances, _ = knn.kneighbors(embeddings_norm)
+
+        relevant_dists = distances[:, 1:]
+        weighted_dists = (relevant_dists * weights).sum(axis=1)
+
+        max_val = weighted_dists.max()
+        if max_val > 0:
+            weighted_dists /= max_val
+
+    # ── Stats and save ────────────────────────────────────────────────────────
+    _log(
+        f"Uniqueness stats: "
+        f"min={weighted_dists.min():.4f}  "
+        f"mean={weighted_dists.mean():.4f}  "
+        f"max={weighted_dists.max():.4f}",
+        verbose,
+    )
+    _log(
+        f"Above 0.5: {(weighted_dists > 0.5).sum()}  |  "
+        f"above 0.9: {(weighted_dists > 0.9).sum()}  "
+        f"(out of {N})",
+        verbose,
+    )
+
+    if save:
+        _write_field(dataset, sample_ids, weighted_dists, uniqueness_field, verbose)
+        _log(f"Scores saved to '{uniqueness_field}'.", verbose, level="success")
+
+    return weighted_dists, sample_ids
+
+    
 # KMeans Clustering Representativeness
 def compute_clustering_representativeness(
     dataset,

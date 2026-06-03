@@ -1,0 +1,45 @@
+defaults:
+  - model: rtdetr
+  - training: default
+  - augmentation: aug
+  - paths: acacia
+  - logging: debug
+  - _self_
+
+# in config.yaml
+run_name: ${experiment.schema}_${experiment.partition}_seed${seed}_${now:%m%d_%H%M}
+
+# checkpoint
+nc_checkpoint_dir: /share/home/e2406743/code/Dugongs_IRISA-MARBEC-LIRMM/checkpoints/NNN_NC_SEED63_augm_0510_1843/hf_export
+
+# Seed - Schema - Partition - method
+seed: 0
+schema: NWW
+partition : p10
+method: aclr
+
+data:
+  num_workers: 6
+  pin_memory : True
+
+## save model
+save_nc_local: true  # Set to false to skip saving weights
+save_checkpoints: true  # Existing flag for Lightning checkpoints 
+
+profiler: null
+
+logging.tags:
+    - ${schema}
+    - ${partition}
+    - ${method}
+    - ${model.name}
+    - seed${seed}
+
+# to hide subdir hydra: hydra.output_subdir: Null
+hydra:
+  run:
+    dir: ${paths.log_dir}/S${seed}_${schema}_${partition}_${method}_${now:%m%d_%H%M}
+  job_logging:
+    handlers:
+      file:
+        filename: ${hydra.run.dir}/train.log

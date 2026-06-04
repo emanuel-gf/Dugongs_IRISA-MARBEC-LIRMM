@@ -51,7 +51,8 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoImageProcessor
 
-
+import logging
+_log = logging.getLogger(__name__)
 # ── Dataset ───────────────────────────────────────────────────────────────────
 
 class DugongDataset(Dataset):
@@ -141,7 +142,7 @@ class DugongDataset(Dataset):
                             "category_id": int(cls_id),
                         })
             except Exception as e:
-                print(f"  [DugongDataset] Warning: failed to read {label_path}: {e}")
+                _log.info(f"  [DugongDataset] Warning: failed to read {label_path}: {e}")
 
         # ── Augmentation (Albumentations, COCO format) ────────────────────
         if self.augmentor and coco_annotations:
@@ -160,7 +161,7 @@ class DugongDataset(Dataset):
                 class_labels = result["class_labels"]
 
             except Exception as e:
-                print(f"  [DugongDataset] Augmentation failed for {image_path}: {e}")
+                _log.info(f"  [DugongDataset] Augmentation failed for {image_path}: {e}")
                 bboxes       = [ann["bbox"] for ann in coco_annotations]
                 class_labels = [ann["category_id"] for ann in coco_annotations]
         else:

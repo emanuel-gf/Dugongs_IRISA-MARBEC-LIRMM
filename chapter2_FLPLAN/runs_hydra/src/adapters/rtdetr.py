@@ -35,6 +35,8 @@ from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
 
 from src.adapters.base import BaseDetectorAdapter
 
+import logging
+_log = logging.getLogger(__name__)
 
 def _cxcywh_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
     """(..., 4) normalised cxcywh → xyxy (same scale)."""
@@ -73,7 +75,7 @@ class RTDETRAdapter(BaseDetectorAdapter):
             "Check num_classes in model/rtdetr.yaml — it must match the "
             "checkpoint's head (80 for PekingU/rtdetr_r50vd)."
         )
-        print(
+        _log.info(
             f"  [RTDETRAdapter] Loaded '{cfg.checkpoint}' "
             f"head={head_shape}  dugong@class0"
         )
@@ -193,19 +195,19 @@ class RTDETRAdapter(BaseDetectorAdapter):
             missing, unexpected = self.model.load_state_dict(state, strict=False)
             if missing:
                 n = len(missing)
-                print(f"  [RTDETRAdapter] {n} missing keys: "
+                _log.info(f"  [RTDETRAdapter] {n} missing keys: "
                       f"{missing[:3]}{'...' if n > 3 else ''}")
             if unexpected:
                 n = len(unexpected)
-                print(f"  [RTDETRAdapter] {n} unexpected keys: "
+                _log.info(f"  [RTDETRAdapter] {n} unexpected keys: "
                       f"{unexpected[:3]}{'...' if n > 3 else ''}")
-            print(f"  [RTDETRAdapter] Loaded from Lightning ckpt: {path}")
+            _log.info(f"  [RTDETRAdapter] Loaded from Lightning ckpt: {path}")
 
         else:
             # save_pretrained dir or HF Hub id — reload both model and processor
             self.model     = RTDetrForObjectDetection.from_pretrained(path)
             self.processor = RTDetrImageProcessor.from_pretrained(path)
-            print(f"  [RTDETRAdapter] Loaded from pretrained: {path}")
+            _log.info(f"  [RTDETRAdapter] Loaded from pretrained: {path}")
 
         # Always re-apply label remapping — it may not be in the saved config
         self.model.config.id2label[0]        = "dugong"
@@ -234,7 +236,7 @@ class RTDETRAdapter(BaseDetectorAdapter):
                 frozen += 1
         # Only print once (epoch 0)
         if not getattr(self, "_bn_freeze_logged", False):
-            print(f"  [RTDETRAdapter] Frozen {frozen} backbone BN layers")
+            _log.info(f"  [RTDETRAdapter] Frozen {frozen} backbone BN layers")
             self._bn_freeze_logged = True
 
     def backbone_and_head_params(self) -> tuple[list, list]:
@@ -291,7 +293,7 @@ class RTDETRAdapter(BaseDetectorAdapter):
             f"CRITICAL: 'dugong' not at key '0' in saved config.json "
             f"({output_dir / 'config.json'})"
         )
-        print(
+        _log.info(
             f"  [RTDETRAdapter] Saved and verified → {output_dir}\n"
             f"    head={head_shape}  dugong@class0=✓"
         )

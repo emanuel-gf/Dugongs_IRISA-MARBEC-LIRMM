@@ -75,8 +75,10 @@ class DetectorLightningModule(pl.LightningModule):
         map_kwargs = dict(
             iou_type="bbox",
             box_format="xyxy",
-            max_detection_thresholds=[1, 10, 300],
+            max_detection_thresholds=[1, 5, 100],
             backend="faster_coco_eval",
+            ## case want to address the size of bounding box
+            ## area_ranges = {"small":[0,2000],"medium":[2000,8000],"large":[8000,1e10]}
         )
         self.val_map  = MeanAveragePrecision(**map_kwargs)
         self.test_map = MeanAveragePrecision(**map_kwargs)

@@ -153,6 +153,12 @@ def main(cfg: DictConfig) -> None:
             f"Zero-shot | mAP={zs_results[0].get('val/mAP', -1):.4f}  "
             f"mAP_50={zs_results[0].get('val/mAP_50', -1):.4f}"
         )
+        if hasattr(logger, "experiment"):
+            logger.experiment.log({
+                "VAL/zero_shot/mAP":    zs_results[0].get("val/mAP", -1),
+                "VAL/zero_shot/mAP_50": zs_results[0].get("val/mAP_50", -1),
+                "VAL/zero_shot/mAP_75": zs_results[0].get("val/mAP_75", -1),
+            })
 
         # test set
         zs_results = zs_trainer.test(module, datamodule=datamodule)
@@ -160,6 +166,13 @@ def main(cfg: DictConfig) -> None:
             f"Zero-shot | mAP={zs_results[0].get('val/mAP', -1):.4f}  "
             f"mAP_50={zs_results[0].get('val/mAP_50', -1):.4f}"
         )
+        # Also push zero-shot metrics to W&B as epoch -1
+        if hasattr(logger, "experiment"):
+            logger.experiment.log({
+                "TEST/zero_shot/mAP":    zs_results[0].get("val/mAP", -1),
+                "TEST/zero_shot/mAP_50": zs_results[0].get("val/mAP_50", -1),
+                "test/zero_shot/mAP_75": zs_results[0].get("val/mAP_75", -1),
+            })
     # ── 8. Callbacks + main Trainer ───────────────────────────────────────
     callbacks = build_callbacks(cfg, run_name)
 

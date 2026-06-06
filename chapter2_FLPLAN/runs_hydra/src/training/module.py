@@ -75,7 +75,7 @@ class DetectorLightningModule(pl.LightningModule):
         map_kwargs = dict(
             iou_type="bbox",
             box_format="xyxy",
-            max_detection_thresholds=[1, 5, 100],
+            max_detection_thresholds=[1, 5, 50],
             backend="faster_coco_eval",
             ## case want to address the size of bounding box
             ## area_ranges = {"small":[0,2000],"medium":[2000,8000],"large":[8000,1e10]}
@@ -193,28 +193,34 @@ class DetectorLightningModule(pl.LightningModule):
     def configure_optimizers(self):
         t = self.cfg.training
 
+        # Cast to float — Hydra can deserialise numeric values as strings
+        # when overridden via CLI (e.g. training.lr=1e-4).
+        lr  = float(t.lr)
+        blf = float(t.backbone_lr_factor)
+        wd  = float(t.weight_decay)
+
         # Differential LR: backbone gets lr * backbone_lr_factor
         if hasattr(self.adapter, "backbone_and_head_params"):
             backbone_params, head_params = self.adapter.backbone_and_head_params()
             param_groups = [
-                {"params": backbone_params, "lr": t.lr * t.backbone_lr_factor},
-                {"params": head_params,     "lr": t.lr},
+                {"params": backbone_params, "lr": lr * blf},
+                {"params": head_params,     "lr": lr},
             ]
         else:
-            param_groups = [{"params": self.adapter.parameters(), "lr": t.lr}]
+            param_groups = [{"params": self.adapter.parameters(), "lr": lr}]
 
-        optimizer = AdamW(param_groups, weight_decay=t.weight_decay)
+        optimizer = AdamW(param_groups, weight_decay=wd)
 
         warmup = LinearLR(
             optimizer,
             start_factor=0.1,
             end_factor=1.0,
-            total_iters=t.warmup_epochs,
+            total_iters=int(t.warmup_epochs),
         )
         cosine = CosineAnnealingLR(
             optimizer,
             T_max=t.max_epochs // 2,
-            eta_min=t.lr * t.backbone_lr_factor * 0.01,
+            eta_min=lr * blf * 0.01,
         )
         scheduler = SequentialLR(
             optimizer,

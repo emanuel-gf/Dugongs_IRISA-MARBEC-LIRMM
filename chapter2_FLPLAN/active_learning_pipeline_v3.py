@@ -1,10 +1,10 @@
 """
-VERSION 2 - BALL RADIUS
+VERSION 3 -  CLUSTERING PER SEED (proportional-capped budget)
 run_aclr_pipeline.py
 ====================
 Modified Active Learning sample selection pipeline for the FLPLAN dataset.
 
-Diverse-within cluster sample selection based on latent space.
+Diverse-within-cluster sample selection based on latent space.
 
 Pipeline stages
 ---------------
@@ -15,13 +15,16 @@ Pipeline stages
         Reads full_embeddings for all train_{seed} tagged samples.
 
   3.  ACLR selection  (cluster-stratified diversity sampling)
-        For each partition size:
-         - Adaptative cluster size: Compute the size of the clustering given the partition.
-         Followed by:
-          a) KMeans clustering
-          b) Per-cluster weighted kNN uniqueness scoring.
-          c) Per-cluster ball-radius diversity selection.
-       
+        Per seed (NOT per partition):
+          a) KMeans clustering on the FULL train pool — fixed for all partitions.
+        Per partition:
+          b) Proportional-capped budget allocation across clusters.
+          c) Per-cluster weighted kNN uniqueness scoring.
+          d) Per-cluster ball-radius greedy diversity selection.
+
+        Because the cluster structure is frozen per seed, smaller partitions
+        select a strict subset of what larger partitions select (nesting
+        property): p5 ⊆ p10 ⊆ p20 ... up to rounding.
 
   4.  Random baseline
         Random sampling from the same train pool.
@@ -29,28 +32,51 @@ Pipeline stages
   5.  Save results
         Writes {seed: {partition: {method: [sample_ids]}}} to --output-json.
 
+Budget allocation strategy
+--------------------------
+  "proportional_capped"  (default)
+        Each cluster receives a budget proportional to its size relative to
+        the total training pool.  Three guardrails are applied:
+
+          1. Hard cap  : budget_c <= size_c  (can't ask more than available)
+          2. Floor     : budget_c >= 1  (every non-empty cluster contributes)
+          3. Redistribution : surplus freed by capping is reallocated to the
+             largest uncapped clusters (most room to absorb it), until the
+             global budget is exactly met.
+
+  "uniform"
+        Equal split across clusters — kept for ablation.
+
 Architecture
 ------------
+  _allocate_budget()
+      Pure budget calculator.  Returns {cluster_id: budget} dict.
+
   _cluster_diverse_selection_from_arrays()
       Pure-numpy inner function.  Operates entirely on arrays — no FiftyOne
-      dependency.  Called directly by the pipeline for speed.
+      dependency.
 
   compute_cluster_diverse_selection()
-      FiftyOne wrapper.  Loads arrays from dataset fields, calls the inner
-      function, optionally saves nothing (selection only).  Used from notebooks
-      or standalone scripts where data lives in FiftyOne.
+      FiftyOne wrapper.  Used from notebooks or standalone scripts.
+
+  aclr_pipeline()
+      Thin orchestrator.  Receives pre-fitted cluster_labels (no KMeans
+      inside) and iterates over partitions.
 
 Usage
 -----
   python run_aclr_pipeline.py \\
       --dataset FLPLAN --port 44123 \\
-      --seeds 0 63 72 \\
-      --partitions 0.05 0.10 0.25 0.50 0.75 \\
+      --seeds 0 1 2 \\
+      --partitions 0.05 0.10 0.20 0.30 0.40 0.50 1.00 \\
       --embeddings-field full_embeddings \\
       --output-json /share/home/e2406743/results/aclr_selections.json
 
   # Skip tagging if already done
   python run_aclr_pipeline.py ... --skip-tag
+
+  # Use legacy uniform budget split
+  python run_aclr_pipeline.py ... --budget-mode uniform
 """
 
 import os
@@ -76,39 +102,43 @@ def get_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("--dataset",            "-d", required=True)
-    p.add_argument("--port",               default="44123")
-    p.add_argument("--seeds",              nargs="+", type=int, default=[0, 63, 72])
-    p.add_argument("--partitions",         nargs="+", type=float,
-                   default=[0.05, 0.10, 0.25, 0.50, 0.75])
-    p.add_argument("--embeddings-field",   default="full_embeddings")
-    p.add_argument("--stratify-by",        default="m_flight")
-    p.add_argument("--train-size",         type=float, default=0.85)
-    p.add_argument("--val-size",           type=float, default=0.15)
-    p.add_argument("--test-size",          type=float, default=0.15)
-    # clustering
+    p.add_argument("--dataset",             "-d", required=True)
+    p.add_argument("--port",                default="44123")
+    p.add_argument("--seeds",               nargs="+", type=int, default=[0, 1, 2])
+    p.add_argument("--partitions",          nargs="+", type=float,
+                   default=[0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 1.00])
+    p.add_argument("--embeddings-field",    default="full_embeddings")
+    p.add_argument("--stratify-by",         default="m_flight")
+    p.add_argument("--train-size",          type=float, default=0.85)
+    p.add_argument("--val-size",            type=float, default=0.15)
+    p.add_argument("--test-size",           type=float, default=0.15)
+    # clustering — fixed once per seed on the full train pool
+    p.add_argument("--n-clusters",          type=int, default=None,
+                   help="Fixed number of KMeans clusters per seed.  "
+                        "If omitted, adaptive_n_clusters() is used on the "
+                        "full train pool. (default: None → adaptive)")
     p.add_argument("--target-cluster-size", type=int, default=10,
-                   help="Target samples per cluster for adaptive n_clusters. "
-                        "(default: 10)")
+                   help="Target samples per cluster for adaptive n_clusters "
+                        "when --n-clusters is not set. (default: 10)")
     # uniqueness
-    p.add_argument("--k-uniq",             type=int,   default=5,
+    p.add_argument("--k-uniq",              type=int,   default=5,
                    help="kNN neighbours for per-cluster uniqueness. (default: 5)")
-    p.add_argument("--decay",              default="exponential",
+    p.add_argument("--decay",               default="exponential",
                    choices=["exponential", "linear", "power"],
                    help="Decay family for uniqueness weights. (default: exponential)")
-    p.add_argument("--decay-param",        type=float, default=0.5,
+    p.add_argument("--decay-param",         type=float, default=0.5,
                    help="lambda (exponential) or p (power). (default: 0.5)")
     # diversity selection
-    p.add_argument("--ball-radius",        type=float, default=0.5,
+    p.add_argument("--ball-radius",         type=float, default=0.5,
                    help="L2 ball radius for neighbour penalisation. (default: 0.5)")
-    p.add_argument("--penalty",            type=float, default=0.7,
+    p.add_argument("--penalty",             type=float, default=0.7,
                    help="Score multiplier for penalised neighbours. (default: 0.7)")
-    p.add_argument("--budget-mode",        default="uniform",
-                   choices=["uniform", "proportional"],
-                   help="Budget allocation across clusters. (default: uniform)")
+    p.add_argument("--budget-mode",         default="proportional_capped",
+                   choices=["uniform", "proportional_capped"],
+                   help="Budget allocation across clusters. (default: proportional_capped)")
     # misc
-    p.add_argument("--output-json",        "-o", required=True)
-    p.add_argument("--skip-tag",           action="store_true",
+    p.add_argument("--output-json",         "-o", required=True)
+    p.add_argument("--skip-tag",            action="store_true",
                    help="Skip tagging — assume tags already exist.")
     return p.parse_args()
 
@@ -125,6 +155,13 @@ def tag_train_test_seeded_split(
     test_buffer=0.05,
     verbose=True,
 ):
+    """
+    Splits dataset into train/val/test by tagging samples, stratified by
+    a categorical field (e.g. flight mission).  Entire flights are kept
+    together — no flight is split across train and test.
+
+    Tags written: train_{seed}, val_{seed}, test_{seed}, notin_TEST_{seed}
+    """
     def _log(msg):
         if verbose:
             print(f"  {msg}")
@@ -179,9 +216,9 @@ def tag_train_test_seeded_split(
             ids = dataset.match(F(stratify_by) == flight).values("id")
             dataset.select(ids).tag_samples(f"notin_TEST_{seed}")
 
-        tv_view  = dataset.match(F(stratify_by).is_in(non_test))
-        ids_tv   = tv_view.values("id")
-        strata   = tv_view.values(stratify_by)
+        tv_view = dataset.match(F(stratify_by).is_in(non_test))
+        ids_tv  = tv_view.values("id")
+        strata  = tv_view.values(stratify_by)
 
         train_ids, val_ids = train_test_split(
             ids_tv, test_size=val_size,
@@ -196,6 +233,10 @@ def tag_train_test_seeded_split(
 # ── Embedding loader ──────────────────────────────────────────────────────────
 
 def load_train_embeddings(dataset, seed, embeddings_field, verbose=True):
+    """
+    Load L2-normalised embeddings for all train_{seed} tagged samples.
+    Returns (embeddings_norm, sample_ids).
+    """
     print(f"\n  Loading embeddings for train_{seed} ...")
     embeddings = []
     sample_ids = []
@@ -222,6 +263,7 @@ def load_train_embeddings(dataset, seed, embeddings_field, verbose=True):
 # ── Decay weights ─────────────────────────────────────────────────────────────
 
 def _decay_weights(k, decay="exponential", decay_param=0.5):
+    """Compute normalised rank-decay weights for kNN uniqueness scoring."""
     ranks = np.arange(1, k + 1, dtype=np.float64)
     if decay == "exponential":
         w = np.exp(-decay_param * ranks)
@@ -236,15 +278,160 @@ def _decay_weights(k, decay="exponential", decay_param=0.5):
 
 # ── Adaptive n_clusters ───────────────────────────────────────────────────────
 
-def adaptive_n_clusters(partition_size, total_samples,
-                         target_cluster_size=10,
-                         min_clusters=3,
-                         min_points_per_cluster=2):
-    n_samples = int(partition_size * total_samples)
-    ideal     = n_samples // target_cluster_size
+def adaptive_n_clusters(total_samples,
+                        target_cluster_size=10,
+                        min_clusters=3,
+                        min_points_per_cluster=2):
+    """
+    Compute n_clusters from the FULL train pool size.
+
+    Called once per seed (not per partition).  Uses target_cluster_size as
+    the desired points-per-cluster.  Falls back to sqrt heuristic when the
+    pool is too small to fill that many clusters.
+    """
+    ideal = total_samples // target_cluster_size
     if ideal >= min_points_per_cluster:
         return target_cluster_size
-    return max(min_clusters, int(math.floor(math.sqrt(n_samples))))
+    return max(min_clusters, int(math.floor(math.sqrt(total_samples))))
+
+
+# ── KMeans — fitted once per seed ────────────────────────────────────────────
+
+def fit_kmeans(embeddings_norm, n_clusters, seed):
+    """
+    Fit KMeans on the full train pool for this seed.
+
+    Returns
+    -------
+    cluster_labels : np.ndarray (N,)  integer cluster assignment per sample
+    n_clusters     : int              actual number of clusters used
+    """
+    print(f"  Fitting KMeans: n_clusters={n_clusters}  "
+          f"N={len(embeddings_norm)}  seed={seed}")
+    km = KMeans(n_clusters=n_clusters, init="k-means++",
+                n_init=10, random_state=seed)
+    cluster_labels = km.fit_predict(embeddings_norm)
+    sizes = {int(c): int((cluster_labels == c).sum())
+             for c in np.unique(cluster_labels)}
+    print(f"  Cluster sizes: {dict(sorted(sizes.items()))}")
+    return cluster_labels
+
+
+# ── Budget allocation ─────────────────────────────────────────────────────────
+
+def _allocate_budget(cluster_sizes, total_budget, mode="proportional_capped"):
+    """
+    Allocate total_budget across clusters.
+
+    Parameters
+    ----------
+    cluster_sizes : dict  {cluster_id (int): size (int)}
+    total_budget  : int   total number of samples to select
+    mode          : str   "proportional_capped" | "uniform"
+
+    Returns
+    -------
+    budgets : dict  {cluster_id (int): budget (int)}
+
+    proportional_capped strategy
+    ----------------------------
+    Step 1 — Proportional base
+        budget_c = round(total_budget * size_c / total_N)
+
+    Step 2 — Floor
+        budget_c = max(1, budget_c)  — every non-empty cluster contributes
+
+    Step 3 — Hard cap
+        budget_c = min(budget_c, size_c)  — can't select more than available
+
+    Step 4 — Integer reconciliation
+        After rounding, the sum may drift from total_budget.  Drift is
+        corrected by adding/removing 1 from the clusters sorted by fractional
+        remainder (ties broken by cluster size descending).
+
+    Step 5 — Redistribute surplus freed by hard cap
+        If capping freed budget, surplus flows to uncapped clusters with the
+        most remaining capacity (size_c - budget_c), largest first.
+    """
+    cluster_ids = sorted(cluster_sizes.keys())
+    total_N     = sum(cluster_sizes.values())
+
+    # ── Uniform ───────────────────────────────────────────────────────────
+    if mode == "uniform":
+        base     = total_budget // len(cluster_ids)
+        budgets  = {c: base for c in cluster_ids}
+        leftover = total_budget - base * len(cluster_ids)
+        for c in sorted(cluster_ids,
+                        key=lambda c: cluster_sizes[c], reverse=True):
+            if leftover <= 0:
+                break
+            budgets[c] += 1
+            leftover   -= 1
+        for c in cluster_ids:
+            budgets[c] = min(budgets[c], cluster_sizes[c])
+        return budgets
+
+    # ── Proportional capped ───────────────────────────────────────────────
+    if mode == "proportional_capped":
+
+        # Step 1: raw proportional (float)
+        raw = {c: total_budget * cluster_sizes[c] / total_N
+               for c in cluster_ids}
+
+        # Step 2: round to int + floor at 1
+        budgets = {c: max(1, round(raw[c])) for c in cluster_ids}
+
+        # Step 3: hard cap at cluster size
+        for c in cluster_ids:
+            budgets[c] = min(budgets[c], cluster_sizes[c])
+
+        # Step 4: integer reconciliation
+        frac_order = sorted(cluster_ids,
+                            key=lambda c: (raw[c] - math.floor(raw[c]),
+                                          cluster_sizes[c]),
+                            reverse=True)
+        drift = sum(budgets.values()) - total_budget
+        if drift > 0:
+            # over-allocated — remove 1 from clusters with smallest fraction
+            for c in reversed(frac_order):
+                if drift == 0:
+                    break
+                if budgets[c] > 1:
+                    budgets[c] -= 1
+                    drift      -= 1
+        elif drift < 0:
+            # under-allocated — add 1 to clusters with most remaining capacity
+            capacity_order = sorted(cluster_ids,
+                                    key=lambda c: cluster_sizes[c] - budgets[c],
+                                    reverse=True)
+            for c in capacity_order:
+                if drift == 0:
+                    break
+                if budgets[c] < cluster_sizes[c]:
+                    budgets[c] += 1
+                    drift      += 1
+
+        # Step 5: redistribute surplus freed by the hard cap
+        current_total = sum(budgets.values())
+        surplus       = total_budget - current_total
+
+        if surplus > 0:
+            capacity_order = sorted(
+                [c for c in cluster_ids if budgets[c] < cluster_sizes[c]],
+                key=lambda c: cluster_sizes[c] - budgets[c],
+                reverse=True,
+            )
+            for c in capacity_order:
+                if surplus == 0:
+                    break
+                room        = cluster_sizes[c] - budgets[c]
+                give        = min(room, surplus)
+                budgets[c] += give
+                surplus    -= give
+
+        return budgets
+
+    raise ValueError(f"budget_mode='{mode}' not supported.")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -252,24 +439,29 @@ def adaptive_n_clusters(partition_size, total_samples,
 # ════════════════════════════════════════════════════════════════════════════
 
 def _cluster_diverse_selection_from_arrays(
-    embeddings_norm:   np.ndarray,          # (N, D) L2-normalised
-    cluster_labels:    np.ndarray,          # (N,)  integer cluster assignments
+    embeddings_norm:   np.ndarray,      # (N, D) L2-normalised
+    cluster_labels:    np.ndarray,      # (N,)  integer cluster assignments
+                                        #        — FIXED, same for all partitions
     partition_size:    float,
     k_uniq:            int   = 5,
     decay:             str   = "exponential",
     decay_param:       float = 0.5,
     ball_radius:       float = 0.5,
     penalty:           float = 0.7,
-    budget_mode:       str   = "uniform",
+    budget_mode:       str   = "proportional_capped",
     seed:              int   = 42,
     verbose:           bool  = True,
 ) -> tuple[list, dict]:
     """
     Cluster-stratified diversity sampling — pure numpy inner function.
 
+    cluster_labels is supplied externally and is FIXED for all partitions of
+    a given seed.  Only the budget changes per partition, which gives the
+    nesting property: p5 ⊆ p10 ⊆ p20 (approximately).
+
     Steps
     -----
-    1. KMeans cluster assignments are supplied externally (cluster_labels).
+    1. Budget allocated via _allocate_budget() — proportional_capped by default.
     2. Per-cluster uniqueness: kNN within each cluster → weighted cosine distances.
     3. Per-cluster ball-radius selection: rank by uniqueness, penalise neighbours,
        greedily select until per-cluster budget is met.
@@ -277,13 +469,13 @@ def _cluster_diverse_selection_from_arrays(
     Parameters
     ----------
     embeddings_norm  : (N, D) L2-normalised embedding matrix
-    cluster_labels   : (N,)  integer cluster label per sample
+    cluster_labels   : (N,)  integer cluster label per sample (fixed per seed)
     partition_size   : fraction of N to select
     k_uniq           : kNN neighbours for uniqueness (within cluster)
     decay / decay_param : weight decay family for uniqueness
     ball_radius      : L2 distance threshold for neighbour penalisation
     penalty          : score multiplier for penalised neighbours
-    budget_mode      : "uniform" | "proportional"
+    budget_mode      : "proportional_capped" | "uniform"
     seed             : random seed for tie-breaking
     verbose          : print per-cluster stats
 
@@ -299,44 +491,17 @@ def _cluster_diverse_selection_from_arrays(
     N               = len(embeddings_norm)
     total_budget    = max(1, int(round(partition_size * N)))
     unique_clusters = np.unique(cluster_labels)
-    n_clusters      = len(unique_clusters)
     cluster_sizes   = {int(c): int((cluster_labels == c).sum())
                        for c in unique_clusters}
 
     # ── Budget allocation ─────────────────────────────────────────────────
-    if budget_mode == "uniform":
-        base    = total_budget // n_clusters
-        budgets = {int(c): base for c in unique_clusters}
-        leftover = total_budget - base * n_clusters
-        for c in sorted(unique_clusters,
-                        key=lambda c: cluster_sizes[int(c)], reverse=True):
-            if leftover <= 0:
-                break
-            budgets[int(c)] += 1
-            leftover        -= 1
-
-    elif budget_mode == "proportional":
-        total_s = sum(cluster_sizes.values())
-        budgets = {}
-        allocated = 0
-        for c in unique_clusters:
-            b = max(1, int(round(total_budget * cluster_sizes[int(c)] / total_s)))
-            budgets[int(c)] = b
-            allocated += b
-        drift = allocated - total_budget
-        for c in sorted(unique_clusters,
-                        key=lambda c: budgets[int(c)], reverse=(drift > 0)):
-            if drift == 0:
-                break
-            if drift > 0 and budgets[int(c)] > 1:
-                budgets[int(c)] -= 1; drift -= 1
-            elif drift < 0:
-                budgets[int(c)] += 1; drift += 1
-    else:
-        raise ValueError(f"budget_mode='{budget_mode}' not supported.")
+    budgets = _allocate_budget(cluster_sizes, total_budget, mode=budget_mode)
 
     _log(f"N={N}  total_budget={total_budget}  "
-         f"n_clusters={n_clusters}  budget_mode={budget_mode}")
+         f"n_clusters={len(unique_clusters)}  budget_mode={budget_mode}")
+    _log(f"cluster sizes: {dict(sorted(cluster_sizes.items()))}")
+    _log(f"budgets:       {dict(sorted(budgets.items()))}")
+    _log(f"allocated:     {sum(budgets.values())}")
 
     # ── Per-cluster selection ─────────────────────────────────────────────
     rng           = random.Random(seed)
@@ -344,12 +509,12 @@ def _cluster_diverse_selection_from_arrays(
     cluster_stats = {}
 
     for cluster_id in sorted(unique_clusters):
-        cid          = int(cluster_id)
-        cluster_idx  = np.where(cluster_labels == cid)[0]   # global indices
-        n_c          = len(cluster_idx)
-        budget_c     = min(budgets[cid], n_c)
+        cid         = int(cluster_id)
+        cluster_idx = np.where(cluster_labels == cid)[0]   # global indices
+        n_c         = len(cluster_idx)
+        budget_c    = budgets[cid]
 
-        sub_embs     = embeddings_norm[cluster_idx]          # (n_c, D)
+        sub_embs = embeddings_norm[cluster_idx]             # (n_c, D)
 
         # ── Per-cluster uniqueness ────────────────────────────────────────
         k_eff = min(k_uniq, n_c - 1)
@@ -358,12 +523,12 @@ def _cluster_diverse_selection_from_arrays(
             # Single-sample cluster — uniqueness is trivially 1.0
             sub_scores = np.ones(n_c, dtype=np.float64)
         else:
-            w = _decay_weights(k_eff, decay, decay_param)
+            w   = _decay_weights(k_eff, decay, decay_param)
             knn = NearestNeighbors(n_neighbors=k_eff + 1,
                                    metric="cosine", n_jobs=-1)
             knn.fit(sub_embs)
-            dists, _ = knn.kneighbors(sub_embs)
-            raw = (dists[:, 1:] * w).sum(axis=1)
+            dists, _   = knn.kneighbors(sub_embs)
+            raw        = (dists[:, 1:] * w).sum(axis=1)
             sub_scores = raw / raw.max() if raw.max() > 0 else raw
 
         # ── Ball-radius greedy selection ──────────────────────────────────
@@ -383,7 +548,7 @@ def _cluster_diverse_selection_from_arrays(
             visited.add(local_idx)
             chosen_local.append(int(local_idx))
 
-            neighbours = tree.query_ball_point(
+            neighbours  = tree.query_ball_point(
                 sub_embs[local_idx], ball_radius, return_sorted=True
             )
             to_penalise = [n for n in neighbours if n not in visited]
@@ -393,7 +558,7 @@ def _cluster_diverse_selection_from_arrays(
             # Re-rank after downweighting
             order = np.argsort(working)[::-1]
 
-        # Fallback: fill if budget not met (tiny cluster, large ball_radius)
+        # Fallback: fill if budget not met (tiny cluster / large ball_radius)
         if len(chosen_local) < budget_c:
             remaining = [i for i in range(n_c) if i not in chosen_local]
             rng.shuffle(remaining)
@@ -428,14 +593,13 @@ def compute_cluster_diverse_selection(
     dataset,
     embeddings_field:  str   = "full_embeddings",
     cluster_field:     str   = "cluster_label",
-    uniqueness_field:  str   = None,   # optional — not used by inner fn
     partition_size:    float = 0.10,
     k_uniq:            int   = 5,
     decay:             str   = "exponential",
     decay_param:       float = 0.5,
     ball_radius:       float = 0.5,
     penalty:           float = 0.7,
-    budget_mode:       str   = "uniform",
+    budget_mode:       str   = "proportional_capped",
     seed:              int   = 42,
     verbose:           bool  = True,
 ) -> tuple[list, dict]:
@@ -445,14 +609,15 @@ def compute_cluster_diverse_selection(
     Loads embeddings and cluster labels from FiftyOne fields, runs the
     inner function, and returns selected sample IDs (strings).
 
+    Note: this wrapper is for notebook / standalone use where cluster labels
+    are already stored as a FiftyOne field.  In the main pipeline the
+    clustering is fitted via fit_kmeans() and passed directly.
+
     Parameters
     ----------
     dataset           : FiftyOne dataset or view
     embeddings_field  : field with L2-normalised embeddings
-    cluster_field     : field with integer cluster labels
-    uniqueness_field  : unused here (inner function recomputes per-cluster
-                        uniqueness from scratch for correctness). Kept as
-                        parameter for API consistency with other functions.
+    cluster_field     : field with integer cluster labels (pre-fitted)
     partition_size    : fraction of dataset to select
     ...               : remaining params forwarded to inner function
 
@@ -493,7 +658,6 @@ def compute_cluster_diverse_selection(
     _log(f"Loaded {N} samples  dim={embeddings_norm.shape[1]}  "
          f"clusters={len(np.unique(cluster_labels))}")
 
-    # Call pure-numpy inner function
     selected_idx, cluster_stats = _cluster_diverse_selection_from_arrays(
         embeddings_norm = embeddings_norm,
         cluster_labels  = cluster_labels,
@@ -513,72 +677,78 @@ def compute_cluster_diverse_selection(
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  ACLR PIPELINE  (thin orchestrator — calls inner function directly)
+#  ACLR PIPELINE — receives pre-fitted cluster_labels, iterates partitions
 # ════════════════════════════════════════════════════════════════════════════
 
 def aclr_pipeline(
     embeddings_norm,
     sample_ids,
-    partition_size,
-    target_cluster_size = 10,
-    k_uniq              = 5,
-    decay               = "exponential",
-    decay_param         = 0.5,
-    ball_radius         = 0.5,
-    penalty             = 0.7,
-    budget_mode         = "uniform",
-    seed                = 42,
+    cluster_labels,         # pre-fitted — fixed for ALL partitions of this seed
+    partitions,             # list of floats, e.g. [0.05, 0.10, 0.20, ...]
+    k_uniq       = 5,
+    decay        = "exponential",
+    decay_param  = 0.5,
+    ball_radius  = 0.5,
+    penalty      = 0.7,
+    budget_mode  = "proportional_capped",
+    seed         = 42,
 ):
     """
-    Cluster-stratified ACLR for one partition size.
+    Cluster-stratified ACLR for all partitions of one seed.
 
-    Steps
-    -----
-    1. Adaptive KMeans — n_clusters scales with partition size.
-    2. _cluster_diverse_selection_from_arrays — per-cluster uniqueness +
-       ball-radius greedy selection.
+    cluster_labels is computed ONCE on the full train pool before calling
+    this function (see fit_kmeans()).  The same cluster structure is reused
+    for every partition, giving the nesting property p5 ⊆ p10 ⊆ p20.
+
+    Parameters
+    ----------
+    embeddings_norm : (N, D) L2-normalised embeddings for the full train pool
+    sample_ids      : list of N FiftyOne sample ID strings
+    cluster_labels  : (N,) integer array — KMeans result on full train pool
+    partitions      : list of partition fractions to process
+    ...             : remaining hyperparams forwarded to inner function
 
     Returns
     -------
-    selected_ids : list of sample ID strings
-    cluster_stats: dict with per-cluster metadata
+    results : dict  {partition_key: {"ids": [...], "stats": {...}}}
+              e.g.  {"p5": {"ids": [...], "stats": {...}}, "p10": {...}, ...}
     """
-    N          = len(embeddings_norm)
-    n_clusters = adaptive_n_clusters(partition_size, N,
-                                      target_cluster_size=target_cluster_size)
+    results = {}
 
-    print(f"    partition={partition_size:.0%}  "
-          f"target={int(round(partition_size*N))}  "
-          f"n_clusters={n_clusters}")
+    for partition_size in partitions:
+        key = f"p{int(partition_size * 100)}"
+        print(f"\n    [{key}] partition={partition_size:.0%}  "
+              f"target={int(round(partition_size * len(embeddings_norm)))}")
 
-    # ── Step 1: KMeans ────────────────────────────────────────────────────
-    km = KMeans(n_clusters=n_clusters, init="k-means++",
-                n_init=10, random_state=seed)
-    cluster_labels = km.fit_predict(embeddings_norm)
+        selected_idx, cluster_stats = _cluster_diverse_selection_from_arrays(
+            embeddings_norm = embeddings_norm,
+            cluster_labels  = cluster_labels,
+            partition_size  = partition_size,
+            k_uniq          = k_uniq,
+            decay           = decay,
+            decay_param     = decay_param,
+            ball_radius     = ball_radius,
+            penalty         = penalty,
+            budget_mode     = budget_mode,
+            seed            = seed,
+            verbose         = True,
+        )
 
-    # ── Step 2: cluster-stratified diversity selection ────────────────────
-    selected_idx, cluster_stats = _cluster_diverse_selection_from_arrays(
-        embeddings_norm = embeddings_norm,
-        cluster_labels  = cluster_labels,
-        partition_size  = partition_size,
-        k_uniq          = k_uniq,
-        decay           = decay,
-        decay_param     = decay_param,
-        ball_radius     = ball_radius,
-        penalty         = penalty,
-        budget_mode     = budget_mode,
-        seed            = seed,
-        verbose         = True,
-    )
+        selected_ids = [sample_ids[i] for i in selected_idx]
+        print(f"    [{key}] final selected: {len(selected_ids)}")
 
-    selected_ids = [sample_ids[i] for i in selected_idx]
-    print(f"    final selected: {len(selected_ids)}")
-    return selected_ids, cluster_stats
+        results[key] = {
+            "ids":   selected_ids,
+            "stats": cluster_stats,
+        }
+
+    return results
 
 
 # ── Random baseline ───────────────────────────────────────────────────────────
 
 def random_baseline(sample_ids, partition_size, seed):
+    """Random sample WITHOUT replacement from the full train pool."""
     N      = len(sample_ids)
     target = math.floor(partition_size * N)
     rng    = random.Random(seed)
@@ -627,43 +797,56 @@ def main():
     for seed in args.seeds:
         print(f"\n{'='*60}\nSEED {seed}\n{'='*60}")
 
+        # Stage 2: load embeddings for this seed's train pool
         embeddings_norm, sample_ids = load_train_embeddings(
             dataset, seed, args.embeddings_field, verbose=False
         )
         N = len(sample_ids)
         print(f"  Train pool: {N} samples")
 
+        # Stage 3a: fit KMeans ONCE on the full train pool for this seed
+        n_clusters = (
+            args.n_clusters
+            if args.n_clusters is not None
+            else adaptive_n_clusters(N,
+                                     target_cluster_size=args.target_cluster_size)
+        )
+        cluster_labels = fit_kmeans(embeddings_norm, n_clusters, seed)
+
+        # Stage 3b: ACLR selection for all partitions (fixed cluster structure)
+        print(f"\n  [ACLR] running all partitions with fixed clustering ...")
+        aclr_results = aclr_pipeline(
+            embeddings_norm = embeddings_norm,
+            sample_ids      = sample_ids,
+            cluster_labels  = cluster_labels,
+            partitions      = args.partitions,
+            k_uniq          = args.k_uniq,
+            decay           = args.decay,
+            decay_param     = args.decay_param,
+            ball_radius     = args.ball_radius,
+            penalty         = args.penalty,
+            budget_mode     = args.budget_mode,
+            seed            = seed,
+        )
+
+        # Stage 4: random baseline for all partitions
+        print(f"\n  [Random] running all partitions ...")
         results[str(seed)] = {}
 
         for partition in args.partitions:
-            key = f"p{int(partition*100)}"
-            print(f"\n  Partition {partition:.0%}  ({key})")
+            key = f"p{int(partition * 100)}"
             results[str(seed)][key] = {}
 
             # ACLR
-            print("  -- ACLR --")
-            aclr_ids, stats = aclr_pipeline(
-                embeddings_norm     = embeddings_norm,
-                sample_ids          = sample_ids,
-                partition_size      = partition,
-                target_cluster_size = args.target_cluster_size,
-                k_uniq              = args.k_uniq,
-                decay               = args.decay,
-                decay_param         = args.decay_param,
-                ball_radius         = args.ball_radius,
-                penalty             = args.penalty,
-                budget_mode         = args.budget_mode,
-                seed                = seed,
-            )
-            results[str(seed)][key]["aclr"]          = aclr_ids
-           # results[str(seed)][key]["aclr_stats"]    = stats
+            results[str(seed)][key]["aclr"]       = aclr_results[key]["ids"]
+            #results[str(seed)][key]["aclr_stats"]  = aclr_results[key]["stats"]
 
-            # Random baseline
-            print("  -- Random --")
+            # Random
             rand_ids = random_baseline(sample_ids, partition, seed)
             results[str(seed)][key]["random"] = rand_ids
 
-            print(f"  ACLR={len(aclr_ids)}  Random={len(rand_ids)}")
+            print(f"  {key}  ACLR={len(aclr_results[key]['ids']):>5}  "
+                  f"Random={len(rand_ids):>5}")
 
     # ── Save ──────────────────────────────────────────────────────────────
     out = Path(args.output_json)
@@ -675,7 +858,7 @@ def main():
     print("\n── Summary ──────────────────────────────────────────────────")
     for seed in args.seeds:
         for partition in args.partitions:
-            key = f"p{int(partition*100)}"
+            key = f"p{int(partition * 100)}"
             na = len(results[str(seed)][key]["aclr"])
             nr = len(results[str(seed)][key]["random"])
             print(f"  SEED{seed}  {key:>4}  ACLR={na:>5}  Random={nr:>5}")

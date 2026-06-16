@@ -34,7 +34,7 @@ from src.training.callbacks import build_callbacks
 from src.data.datamodule import DugongDataModule
 from src.training.module import DetectorLightningModule
 from src.training.logger_factory import build_logger
-
+from src.data.data_augmentation import build_augmentor
 log = logging.getLogger(__name__)
 
 
@@ -75,6 +75,14 @@ log = logging.getLogger(__name__)
 # ── Suppress faster_coco_eval INFO spam ──────────────────────────────────────
 logging.getLogger("faster_coco_eval.core.cocoeval").setLevel(logging.WARNING)
 
+
+def _is_wandb(logger) -> bool:
+    """Return True only if the logger is a WandbLogger with a live experiment."""
+    try:
+        from pytorch_lightning.loggers import WandbLogger
+        return isinstance(logger, WandbLogger)
+    except ImportError:
+        return False
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -119,7 +127,7 @@ def main(cfg: DictConfig) -> None:
     module = DetectorLightningModule(adapter=adapter, cfg=cfg, inference_dir=None) #this is none because of the zero-shot when initializing. 
 
     # ── 6. Processor + augmentor + DataModule ─────────────────────────────
-    augmentor = _build_augmentor(cfg)
+    augmentor = build_augmentor(cfg.get("augmentation"))
     processor = AutoImageProcessor.from_pretrained(cfg.model.checkpoint)
 
     datamodule = DugongDataModule(
@@ -153,12 +161,12 @@ def main(cfg: DictConfig) -> None:
             f"Zero-shot | mAP={zs_results[0].get('val/mAP', -1):.4f}  "
             f"mAP_50={zs_results[0].get('val/mAP_50', -1):.4f}"
         )
-        if hasattr(logger, "experiment"):
-            logger.experiment.log({
-                "VAL/zero_shot/mAP":    zs_results[0].get("val/mAP", -1),
-                "VAL/zero_shot/mAP_50": zs_results[0].get("val/mAP_50", -1),
-                "VAL/zero_shot/mAP_75": zs_results[0].get("val/mAP_75", -1),
-            })
+        if _is_wandb(logger):
+                logger.experiment.log({
+                    "VAL/zero_shot/mAP":    zs_results[0].get("val/mAP", -1),
+                    "VAL/zero_shot/mAP_50": zs_results[0].get("val/mAP_50", -1),
+                    "VAL/zero_shot/mAP_75": zs_results[0].get("val/mAP_75", -1),
+                })
 
         # test set
         zs_results = zs_trainer.test(module, datamodule=datamodule)
@@ -167,12 +175,12 @@ def main(cfg: DictConfig) -> None:
             f"mAP_50={zs_results[0].get('val/mAP_50', -1):.4f}"
         )
         # Also push zero-shot metrics to W&B as epoch -1
-        if hasattr(logger, "experiment"):
-            logger.experiment.log({
-                "TEST/zero_shot/mAP":    zs_results[0].get("val/mAP", -1),
-                "TEST/zero_shot/mAP_50": zs_results[0].get("val/mAP_50", -1),
-                "test/zero_shot/mAP_75": zs_results[0].get("val/mAP_75", -1),
-            })
+        if _is_wandb(logger):
+                logger.experiment.log({
+                    "TEST/zero_shot/mAP":    zs_results[0].get("val/mAP", -1),
+                    "TEST/zero_shot/mAP_50": zs_results[0].get("val/mAP_50", -1),
+                    "TEST/zero_shot/mAP_75": zs_results[0].get("val/mAP_75", -1),
+                })
     # ── 8. Callbacks + main Trainer ───────────────────────────────────────
     callbacks = build_callbacks(cfg, run_name)
 
@@ -209,48 +217,7 @@ def main(cfg: DictConfig) -> None:
         _save_nc_weights(cfg, module, processor, run_name)
 
 
-# ── Augmentor factory ─────────────────────────────────────────────────────────
 
-def _build_augmentor(cfg):
-    """
-    Build Albumentations Compose from cfg.augmentation.name.
-    Supported: none | flip | flip_only | ot_color (stub → falls back to flip)
-    """
-    aug_cfg = cfg.get("augmentation")
-    if aug_cfg is None:
-        return None
-
-    aug_name = aug_cfg.get("name", "none")
-    if aug_name == "none":
-        return None
-
-    try:
-        import albumentations as A
-    except ImportError:
-        log.warning("albumentations not installed — skipping augmentation.")
-        return None
-
-    bbox_params = A.BboxParams(
-        format       = "coco",
-        label_fields = ["class_labels"],
-        min_visibility = 0.1,
-    )
-    flips = [
-        A.HorizontalFlip(p=aug_cfg.get("horizontal_flip_p", 0.5)),
-        A.VerticalFlip(p=aug_cfg.get("vertical_flip_p",   0.5)),
-    ]
-
-    if aug_name in ("flip", "flip_only"):
-        return A.Compose(flips, bbox_params=bbox_params)
-
-    if aug_name == "ot_color":
-        # OTColorTransfer not yet implemented as Albumentations transform.
-        # Falls back to flips until it is ready — plug in here when done.
-        log.warning("ot_color not yet implemented — falling back to flip.")
-        return A.Compose(flips, bbox_params=bbox_params)
-
-    log.warning(f"Unknown augmentation '{aug_name}' — no augmentation applied.")
-    return None
 
 
 # ── NC weight saving ──────────────────────────────────────────────────────────

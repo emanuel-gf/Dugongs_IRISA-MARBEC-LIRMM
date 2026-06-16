@@ -310,8 +310,9 @@ class DetectorLightningModule(pl.LightningModule):
 
     def _log_map_breakdown(self, prefix: str, result: dict):
         """Log size-specific mAP sub-metrics for diagnostics."""
+        # mar keys must match max_detection_thresholds=[1, 5, 50]
         for key in ("map_small", "map_medium", "map_large",
-                    "mar_1", "mar_10", "mar_300"):
+                    "mar_1", "mar_5", "mar_50"):
             val = result.get(key, torch.tensor(-1.0))
             self.log(f"{prefix}/{key}", val, sync_dist=False)
 

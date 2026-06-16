@@ -1,0 +1,9 @@
+enabled: false
+project: null
+run_name: deebug
+entity: null
+tags: [debug]
+log_model: false
+log_every_n_steps: 1
+watch_model: false
+first_batch_log: True

@@ -1,15 +1,14 @@
 defaults:
   - model: rtdetr
   - training: default
-  - augmentation: aug
+  - augmentation: flip_color
   - paths: acacia
-  - logging: debug
+  - logging: wandb
   - _self_
 
-# in config.yaml
-run_name: ${experiment.schema}_${experiment.partition}_seed${seed}_${now:%m%d_%H%M}
 
 # checkpoint
+#nc_checkpoint_dir: null
 nc_checkpoint_dir: /share/home/e2406743/code/Dugongs_IRISA-MARBEC-LIRMM/checkpoints/NNN_NC_SEED63_augm_0510_1843/hf_export
 
 # Seed - Schema - Partition - method
@@ -18,6 +17,9 @@ schema: NWW
 partition : p10
 method: aclr
 
+# in config.yaml
+run_name: ${schema}_${partition}_seed${seed}_${now:%m%d_%H%M}
+
 data:
   num_workers: 6
   pin_memory : True
@@ -25,7 +27,9 @@ data:
 ## save model
 save_nc_local: true  # Set to false to skip saving weights
 save_checkpoints: true  # Existing flag for Lightning checkpoints 
+save_test_predictions: true #To save the predictions into a json format
 
+# lightning profiler.
 profiler: null
 
 logging.tags:
@@ -40,6 +44,21 @@ hydra:
   run:
     dir: ${paths.log_dir}/S${seed}_${schema}_${partition}_${method}_${now:%m%d_%H%M}
   job_logging:
+    version: 1
+    formatters:
+      simple:
+        format: '[%(asctime)s][%(name)s][%(levelname)s] - %(message)s'
     handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: simple
+        stream: ext://sys.stdout
       file:
+        class: logging.FileHandler
+        formatter: simple
         filename: ${hydra.run.dir}/train.log
+        mode: w
+    root:
+      level: INFO
+      handlers: [console, file]
+    disable_existing_loggers: false

@@ -1,0 +1,3 @@
+name: "flip"
+horizontal_flip_p: 0.5
+vertical_flip_p: 0.5

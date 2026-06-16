@@ -1,0 +1,8 @@
+name: flip_color_ot
+
+# OT color transfer 
+ot_n_samples:      300
+ot_reg_e:          0.1
+ot_max_pool_size:  50
+ot_p:              0.9
+ot_reference_json: "/share/home/e2406743/code/Dugongs_IRISA-MARBEC-LIRMM/chapter2_FLPLAN/splits_json/references_ot.json"

@@ -136,32 +136,51 @@ def _write_patch_field(
     n_missing_sample  = 0
     n_missing_det     = 0
 
-    for sid, expected_detids in sampleid_to_detids.items():
-        try:
-            sample = dataset[sid]
-        except Exception:
-            n_missing_sample += len(expected_detids)
-            continue
+    all_sample_ids = list(sampleid_to_detids.keys())
 
-        det_obj = sample[patches_field]
-        if not det_obj or not det_obj.detections:
-            n_missing_det += len(expected_detids)
-            continue
+    # ── Batched query instead of one dataset[sid] fetch per sample ──────────
+    # dataset[sid] is effectively its own find_one query. Calling it
+    # thousands of times sequentially (plus a separate sample.save() per
+    # sample) sends thousands of individual round trips to MongoDB, which
+    # can overload a manually-started mongod instance enough to make it
+    # unresponsive. dataset.select(ids) issues ONE batched query (an $in
+    # filter), and iter_samples(autosave=True) reuses a single cursor with
+    # FiftyOne's own internal write batching -- a single MongoDB session
+    # doing far fewer, larger operations instead of many tiny ones.
+    #
+    # chunk_size further bounds how large any single $in query/save batch
+    # gets, in case the full sample set is itself very large.
+    chunk_size = 2000
 
-        found_detids = set()
-        changed = False
-        for det in det_obj.detections:
-            if det.id in expected_detids:
-                det[target_field] = detid_to_value[det.id]
-                found_detids.add(det.id)
-                n_written += 1
-                changed = True
+    for start in range(0, len(all_sample_ids), chunk_size):
+        chunk_ids = all_sample_ids[start:start + chunk_size]
+        found_in_chunk = set()
 
-        missing_here = expected_detids - found_detids
-        n_missing_det += len(missing_here)
+        view = dataset.select(chunk_ids)
 
-        if changed:
-            sample.save()
+        for sample in view.iter_samples(autosave=True, progress=verbose):
+            sid = sample.id
+            found_in_chunk.add(sid)
+            expected_detids = sampleid_to_detids[sid]
+
+            det_obj = sample[patches_field]
+            if not det_obj or not det_obj.detections:
+                n_missing_det += len(expected_detids)
+                continue
+
+            found_detids = set()
+            for det in det_obj.detections:
+                if det.id in expected_detids:
+                    det[target_field] = detid_to_value[det.id]
+                    found_detids.add(det.id)
+                    n_written += 1
+
+            missing_here = expected_detids - found_detids
+            n_missing_det += len(missing_here)
+
+        missing_sample_ids = set(chunk_ids) - found_in_chunk
+        for sid in missing_sample_ids:
+            n_missing_sample += len(sampleid_to_detids[sid])
 
     if n_missing_sample or n_missing_det:
         _log(f"  WARNING: {n_missing_sample} row(s) had an unresolvable "
@@ -353,14 +372,22 @@ def compute_uniqueness_patches(
     if cluster_labels is None and cluster_field is not None:
         _log(f"Reading cluster labels from Detection.{cluster_field} ...", verbose)
         lookup = {}
-        for sid in np.unique(sample_ids):
-            sample = dataset[str(sid)]
-            det_obj = sample[patches_field]
-            if det_obj and det_obj.detections:
-                for det in det_obj.detections:
-                    val = det.get_field(cluster_field) if hasattr(det, "get_field") else None
-                    if val is not None:
-                        lookup[det.id] = val
+
+        # Same batching fix as _write_patch_field: one dataset.select(ids)
+        # query instead of one dataset[sid] fetch per sample.
+        unique_sids = [str(s) for s in np.unique(sample_ids)]
+        chunk_size = 2000
+        for start in range(0, len(unique_sids), chunk_size):
+            chunk_ids = unique_sids[start:start + chunk_size]
+            view = dataset.select(chunk_ids)
+            for sample in view.iter_samples(progress=verbose):
+                det_obj = sample[patches_field]
+                if det_obj and det_obj.detections:
+                    for det in det_obj.detections:
+                        val = det.get_field(cluster_field) if hasattr(det, "get_field") else None
+                        if val is not None:
+                            lookup[det.id] = val
+
         cluster_labels = np.array([lookup.get(str(did), -1) for did in detection_ids])
         n_unresolved = (cluster_labels == -1).sum()
         if n_unresolved:

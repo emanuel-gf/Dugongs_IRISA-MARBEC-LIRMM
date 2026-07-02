@@ -29,7 +29,49 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
+
+def _get_font(img_w: int, img_h: int, scale: float = 0.05):
+    """
+    Tries to load a real TrueType font sized relative to the image
+    (5% of the longer side by default); falls back to PIL's tiny
+    built-in bitmap font if none is available.
+    """
+    size = max(14, int(max(img_w, img_h) * scale))
+    for name in ("DejaVuSans-Bold.ttf", "DejaVuSans.ttf", "Arial.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _draw_label(pil_img: Image.Image, text: str,
+                text_color=(255, 255, 255),
+                bg_color=(0, 0, 0),
+                margin: int = 8,
+                padding: int = 6) -> Image.Image:
+    """
+    Returns a COPY of pil_img with `text` drawn in the upper-left corner
+    on a filled background rectangle (for readability over water/imagery).
+    """
+    img = pil_img.copy()
+    draw = ImageDraw.Draw(img)
+    font = _get_font(*img.size)
+
+    # measure text
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+    x0, y0 = margin, margin
+    draw.rectangle(
+        [x0, y0, x0 + tw + 2 * padding, y0 + th + 2 * padding],
+        fill=bg_color,
+    )
+    draw.text((x0 + padding - bbox[0], y0 + padding - bbox[1]),
+              text, fill=text_color, font=font)
+    return img
 
 def _load_yolo_boxes(label_path: Path, img_w: int, img_h: int) -> list:
     """
@@ -83,6 +125,7 @@ def create_failure_reveal_gif(
     output_path: str,
     raw_duration_s: float = 1.5,
     reveal_duration_s: float = 1.0,
+    labels: list | None = None,  
     max_size: int | None = 800,
     box_color: tuple = (0, 255, 136),
     box_width: int = 4,
@@ -123,7 +166,13 @@ def create_failure_reveal_gif(
     durations = []
     missing_labels = []
 
-    for fp in filepaths:
+    if labels is not None and len(labels) != len(filepaths):
+        raise ValueError(
+            f"`labels` must be the same length as `filepaths` "
+            f"({len(labels)} != {len(filepaths)})"
+        )
+    
+    for i,fp in enumerate(filepaths):
         image_path = Path(fp)
 
         with Image.open(image_path) as img:
@@ -136,6 +185,12 @@ def create_failure_reveal_gif(
             new_size = (int(img_w * scale), int(img_h * scale))
             pil_img = pil_img.resize(new_size, Image.LANCZOS)
             img_w, img_h = new_size
+
+        # ── NEW: stamp the per-tile label onto the base image ──────────
+        if labels is not None and labels[i] is not None:
+            lab = labels[i]
+            text = f"{lab:.3f}" if isinstance(lab, float) else str(lab)
+            pil_img = _draw_label(pil_img, text)
 
         label_path = _find_label_path(image_path)
         boxes = _load_yolo_boxes(label_path, img_w, img_h)

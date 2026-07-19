@@ -651,6 +651,18 @@ def plot_sweep(
 # ─────────────────────────────────────────────────────────────────────────────
 # Metrics extraction
 # ─────────────────────────────────────────────────────────────────────────────
+def _ap_from_pr(recall, precision):
+    """All-points AP (area under the P–R curve). Single-class -> this is mAP@iou."""
+    r = np.asarray(recall, dtype=float)
+    p = np.asarray(precision, dtype=float)
+    order = np.argsort(r)
+    r, p = r[order], p[order]
+    mrec = np.concatenate([[0.0], r, [1.0]])
+    mpre = np.concatenate([[p[0] if len(p) else 0.0], p, [0.0]])
+    for i in range(len(mpre) - 2, -1, -1):        # monotone envelope
+        mpre[i] = max(mpre[i], mpre[i + 1])
+    idx = np.where(mrec[1:] != mrec[:-1])[0]
+    return float(np.sum((mrec[idx + 1] - mrec[idx]) * mpre[idx + 1]))
 
 def extract_all_metrics(
     results_dict: dict,
@@ -699,15 +711,20 @@ def extract_all_metrics(
             # chosen operating point for alias columns
             chosen = b_f1 if method == "f1" else b_eer
 
+            ap50 = _ap_from_pr(sw_f1["recall"], sw_f1["precision"])
+            ar50 = float(np.max(sw_f1["recall"]))   # best achievable recall @ IoU 0.5
+
             row = {
                 # ── identification ────────────────────────────────────────────
                 "seed":           seed,
                 "eval_key":       eval_key,
 
                 # ── COCO threshold-free metrics ───────────────────────────────
-                "mAP":            res.mAP(),
-                "mAR":            res.mAR(),
-
+                "mAP_5095":            res.mAP(),
+                "mAR_5095":            res.mAR(),
+                
+                "mAP_50": ap50,      # AP@0.5 from the PR curve (single class -> mAP@0.5)
+                "mAR_50": ar50,
                 # ── F1-optimal operating point ────────────────────────────────
                 "f1_threshold":   b_f1["threshold"],
                 "f1":             b_f1["f1"],

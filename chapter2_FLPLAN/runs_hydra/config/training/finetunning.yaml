@@ -1,0 +1,12 @@
+lr: 2.0e-5
+backbone_lr_factor: 0.07
+weight_decay: 2.5e-3
+batch_size: 4
+max_epochs: 15
+warmup_epochs: 1
+gradient_clip_val: 0.72
+precision: "16-mixed"
+log_every_n_steps: 20
+num_workers: 4
+use_early_stopping: false
+checkpoint_mode: last 

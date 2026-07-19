@@ -126,9 +126,12 @@ def main(cfg: DictConfig) -> None:
     # ── 5. Lightning module ───────────────────────────────────────────────
     module = DetectorLightningModule(adapter=adapter, cfg=cfg, inference_dir=None) #this is none because of the zero-shot when initializing. 
 
-    # ── 6. Processor + augmentor + DataModule ─────────────────────────────
+    # 6. Processor + augmentor + DataModule
     augmentor = build_augmentor(cfg.get("augmentation"))
-    processor = AutoImageProcessor.from_pretrained(cfg.model.checkpoint)
+    processor = AutoImageProcessor.from_pretrained(
+        cfg.model.checkpoint,
+        size={"height": cfg.model.image_size, "width": cfg.model.image_size},
+    )
 
     datamodule = DugongDataModule(
         resolved_paths_json = cfg.paths.resolved_paths_json,
@@ -209,7 +212,10 @@ def main(cfg: DictConfig) -> None:
     # ── 10. Test on best checkpoint ───────────────────────────────────────
     if cfg.get("save_test_predictions", True):
         module.set_inference_dir(cfg.paths.inference_dir)
-    log.info("Running test on best checkpoint …")
+    
+    ckpt_mode = cfg.training.get("checkpoint_mode", "best")
+    test_ckpt = "best" if ckpt_mode == "best" else "last"
+    log.info(f"Running test on {test_ckpt} checkpoint …")
     trainer.test(module, datamodule=datamodule, ckpt_path="best", weights_only=False)
 
     # ── 11. Save NC weights locally / push to HF Hub ─────────────────────

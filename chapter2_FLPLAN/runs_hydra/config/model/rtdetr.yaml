@@ -1,6 +1,7 @@
 name: rtdetr
 checkpoint: PekingU/rtdetr_r50vd ## full path checkpoint
 confidence_threshold: 0.05
+image_size: 1024 
 num_classes: 80          # keep 80-class head strategy
 id2label:
   0: dugong

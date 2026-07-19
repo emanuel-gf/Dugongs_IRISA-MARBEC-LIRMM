@@ -1,6 +1,6 @@
 defaults:
   - model: rtdetr
-  - training: default
+  - training: finetunning
   - augmentation: flip_color
   - paths: acacia
   - logging: wandb
@@ -9,13 +9,17 @@ defaults:
 
 # checkpoint
 #nc_checkpoint_dir: null
-nc_checkpoint_dir: /share/home/e2406743/code/Dugongs_IRISA-MARBEC-LIRMM/checkpoints/NNN_NC_SEED63_augm_0510_1843/hf_export
+nc_checkpoint_dir: /share/home/e2406743/code/Dugongs_IRISA-MARBEC-LIRMM/chapter3/models_run/checkpoint/NNN_p100_random_seed0_rtdetr_0709_1910/hf_export
+
+# For fine tunning, do not use validation and therefore save on the last checkpoint
+checkpoint_mode: last
+use_early_stopping: false
 
 # Seed - Schema - Partition - method
-seed: 0
-schema: NWW
-partition : p10
-method: aclr
+seed: 2
+schema: NNW
+partition : p50
+method: centroid
 
 # in config.yaml
 run_name: ${schema}_${partition}_seed${seed}_${now:%m%d_%H%M}

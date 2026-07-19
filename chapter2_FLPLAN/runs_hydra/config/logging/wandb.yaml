@@ -1,5 +1,5 @@
 enabled: true
-project: flplan200_now_aclr_centroid
+project: chapter3_end
 entity: null             # your W&B username/org, null = default
 tags: []                 # populated dynamically from experiment config
 log_model: false

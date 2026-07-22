@@ -1,5 +1,5 @@
 enabled: true
-project: chapter3_end
+project: triplecheck
 entity: null             # your W&B username/org, null = default
 tags: []                 # populated dynamically from experiment config
 log_model: false

@@ -198,6 +198,14 @@ class DetectorLightningModule(pl.LightningModule):
         lr  = float(t.lr)
         blf = float(t.backbone_lr_factor)
         wd  = float(t.weight_decay)
+        if t.get("max_steps"):
+            warmup = int(t.get("warmup_steps", 50))   
+            t_max = t.max_steps - warmup
+            interval = "step"
+        else:
+            warmup = int(t.get("warmup_epochs", 2))
+            t_max = t.max_epochs - warmup
+            interval = "epoch"
 
         # Differential LR: backbone gets lr * backbone_lr_factor
         if hasattr(self.adapter, "backbone_and_head_params"):
@@ -211,26 +219,29 @@ class DetectorLightningModule(pl.LightningModule):
 
         optimizer = AdamW(param_groups, weight_decay=wd)
 
-        warmup = LinearLR(
+        
+        warmup_sched = LinearLR(
             optimizer,
             start_factor=0.1,
             end_factor=1.0,
-            total_iters=int(t.warmup_epochs),
+            total_iters=warmup,
         )
         cosine = CosineAnnealingLR(
             optimizer,
-            T_max=t.max_epochs // 2,
+            T_max=t_max,
             eta_min=lr * blf * 0.01,
         )
         scheduler = SequentialLR(
             optimizer,
-            schedulers=[warmup, cosine],
-            milestones=[t.warmup_epochs],
+            schedulers=[warmup_sched, cosine],
+            milestones=[warmup],
         )
 
         return {
             "optimizer":    optimizer,
-            "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"},
+            "lr_scheduler": {"scheduler": scheduler,
+                              "interval": interval
+                              },
         }
 
     # ── private helpers ───────────────────────────────────────────────────

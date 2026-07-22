@@ -188,7 +188,8 @@ def main(cfg: DictConfig) -> None:
     callbacks = build_callbacks(cfg, run_name)
 
     trainer = pl.Trainer(
-        max_epochs           = cfg.training.max_epochs,
+        max_epochs           = cfg.training.get("max_epochs") or -1,
+        max_steps            = cfg.training.get("max_steps",  -1),
         accelerator          = "auto",
         devices              = "auto",
         precision            = cfg.training.precision,
@@ -216,7 +217,7 @@ def main(cfg: DictConfig) -> None:
     ckpt_mode = cfg.training.get("checkpoint_mode", "best")
     test_ckpt = "best" if ckpt_mode == "best" else "last"
     log.info(f"Running test on {test_ckpt} checkpoint …")
-    trainer.test(module, datamodule=datamodule, ckpt_path="best", weights_only=False)
+    trainer.test(module, datamodule=datamodule, ckpt_path=test_ckpt)
 
     # ── 11. Save NC weights locally / push to HF Hub ─────────────────────
     if not is_finetune:

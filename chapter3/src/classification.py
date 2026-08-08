@@ -180,7 +180,9 @@ def fit_logistic_regression(
     dict with keys: model, y_pred, y_proba, metrics, results_df, failed_ids
     """
     model = LogisticRegression(
-        C=C, max_iter=max_iter, class_weight=class_weight,
+        C=C, 
+        max_iter=max_iter, 
+        class_weight=class_weight,
         random_state=random_state,
     )
     model.fit(X_train, y_train)
@@ -426,8 +428,11 @@ def fit_mlp(
 
     # ── Train/val split (stratified, since positives are rare) ──────────────
     X_tr, X_val, y_tr, y_val = train_test_split(
-        X_train, y_train, test_size=val_size,
-        stratify=y_train, random_state=random_state, shuffle=True,
+        X_train, y_train, 
+        test_size=val_size,
+        stratify=y_train, 
+        random_state=random_state, 
+        shuffle=True,
     )
     print(f"  Train: {X_tr.shape[0]} (pos={y_tr.sum()})  "
           f"Val: {X_val.shape[0]} (pos={y_val.sum()})  device={device}")

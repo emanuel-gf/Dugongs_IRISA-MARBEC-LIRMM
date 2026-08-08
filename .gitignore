@@ -2,7 +2,6 @@
 *.pyc
 *.ipynb_checkpoints
 __pycache__/
-*.png
 *.csv
 *drafts_file/
 wandb/
@@ -13,3 +12,13 @@ checkpoints/
 NNN_*
 NWW_*
 *.sh
+logs_logger_flplan/*
+logs_*/
+active_learning_images/*
+chapter1_exploringID/presentation/images/*
+chapter1_exploringID/studies/*
+*.json
+*.out
+*.parquet
+*.npz
+*.ckpt

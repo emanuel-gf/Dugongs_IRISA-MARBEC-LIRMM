@@ -32,21 +32,148 @@ Metric note
                 AP = integral p(r) dr definition, without relying on FiftyOne
                 internals that vary across versions.
 
-Requires
---------
-    reconstruct_tile_predictions.add_tile_predictions  (companion module)
+Self-contained: tile-prediction reconstruction (add_tile_predictions,
+derive_field_name) is included below, so no companion module is needed.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import fiftyone as fo
 
-from reconstruct_tile_predictions import add_tile_predictions, derive_field_name
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TILE-PREDICTION RECONSTRUCTION  (JSON -> FiftyOne Detections field)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def derive_field_name(json_path, split_on="_rtdetr"):
+    """
+    Short FiftyOne field name from a prediction JSON path.
+
+    Default rule: take the stem and keep everything left of `split_on`.
+        '.../NNW_p5_centroid_seed1_rtdetr_0606_test_predictions.json'
+            -> 'NNW_p5_centroid_seed1'
+    If `split_on` is not present, the whole stem is used.
+    """
+    stem = Path(json_path).stem
+    return stem.split(split_on)[0] if split_on and split_on in stem else stem
+
+
+def _cxcywh_to_tlwh(cx, cy, w, h, clamp=True):
+    """
+    RT-DETR centre [cx, cy, w, h] -> FiftyOne top-left [x, y, w, h] (normalised).
+    Returns None if the box is degenerate after clamping.
+    """
+    x = cx - w / 2.0
+    y = cy - h / 2.0
+    if clamp:
+        x = min(max(x, 0.0), 1.0)
+        y = min(max(y, 0.0), 1.0)
+        w = min(w, 1.0 - x)
+        h = min(h, 1.0 - y)
+    if w <= 0.0 or h <= 0.0:
+        return None
+    return [x, y, w, h]
+
+
+def _build_detections(raw_dets, confidence_threshold, clamp, default_label):
+    """Turn a JSON entry's detection list into a list of fo.Detection."""
+    out = []
+    for det in raw_dets:
+        conf = float(det.get("confidence", 0.0))
+        if conf < confidence_threshold:
+            continue
+        box = det.get("bounding_box")
+        if not box or len(box) != 4:
+            continue
+        tlwh = _cxcywh_to_tlwh(*box, clamp=clamp)
+        if tlwh is None:
+            continue
+        out.append(
+            fo.Detection(
+                label=det.get("label", default_label),
+                confidence=conf,
+                bounding_box=tlwh,
+            )
+        )
+    return out
+
+
+def add_tile_predictions(
+    dataset,
+    json_path,
+    field_name=None,
+    confidence_threshold=0.0,
+    clamp=True,
+    default_label="dugong",
+    split_on="_rtdetr",
+    verbose=True,
+):
+    """
+    Load a tile-level prediction JSON and write the detections to a FiftyOne
+    Detections field, matching each entry to a sample by filepath (falling back
+    to filename stem). No NMS, no full-image remapping -- evaluation is per tile.
+
+    Returns
+    -------
+    field_name : the field written
+    """
+    json_path = Path(json_path)
+    if not json_path.exists():
+        raise FileNotFoundError(f"JSON not found: {json_path}")
+
+    if field_name is None:
+        field_name = derive_field_name(json_path, split_on=split_on)
+
+    with open(json_path) as f:
+        entries = json.load(f)
+
+    # order-safe lookups: filepath -> id and stem -> id
+    fp_to_id, stem_to_id = {}, {}
+    for sid, fp in dataset.values(["id", "filepath"]):
+        fp_to_id[fp] = sid
+        stem_to_id[Path(fp).stem] = sid
+
+    pred_by_id = {}
+    matched = matched_by_stem = unmatched = n_dets = 0
+    for entry in entries:
+        fp = entry.get("filepath", "")
+        sid = fp_to_id.get(fp)
+        if sid is None:
+            sid = stem_to_id.get(Path(fp).stem)
+            if sid is not None:
+                matched_by_stem += 1
+        if sid is None:
+            unmatched += 1
+            continue
+        dets = _build_detections(
+            entry.get("detections", []), confidence_threshold, clamp, default_label
+        )
+        pred_by_id[sid] = fo.Detections(detections=dets)
+        matched += 1
+        n_dets += len(dets)
+
+    if verbose:
+        print(f"  [add_tile_predictions] '{field_name}': matched {matched} tiles "
+              f"({matched_by_stem} via stem), unmatched {unmatched}, {n_dets} detections")
+    if matched == 0:
+        raise ValueError(
+            f"No JSON tiles matched samples in `dataset` for '{field_name}'. "
+            "Check that you passed the tile-level dataset whose filepaths "
+            "correspond to the prediction tiles."
+        )
+
+    view = dataset.select(list(pred_by_id.keys()))
+    for sample in view.iter_samples(autosave=True, progress=False):
+        sample[field_name] = pred_by_id[sample.id]
+
+    return field_name
 
 
 # ── filename parsing ──────────────────────────────────────────────────────────
@@ -105,7 +232,8 @@ def _sweep_metrics(res, iou=0.5, n_thresholds=200):
     ious  = np.array([v if v is not None else 0.0 for v in res.ious],  dtype=float)
 
     pos = set(np.unique(ytrue)) - {"(none)"}
-    is_pos = lambda a: np.isin(a, list(pos))
+    pos_arr = np.array(sorted(pos))            # np array, not list() -> immune to
+    is_pos = lambda a: np.isin(a, pos_arr)     # a shadowed builtin `list` in the notebook
 
     n_gt = int((ypred == "(none)").sum() + (is_pos(ytrue) & is_pos(ypred)).sum())
     pred_mask = ypred != "(none)"

@@ -233,27 +233,12 @@ def main():
     args = get_args()
 
     # --- STEP 1: DATABASE CONFIGURATION (MUST BE BEFORE IMPORT) ---
-    # We use environment variables because FiftyOne reads these during initialization.
-    
-    # Use provided path or default to a user-specific tmp folder
-    db_path = args.path_database
-    if db_path is None:
-        db_path = f"{os.login()}/fiftyone/mongodb"
 
+    # REPLACE with just this — must be set BEFORE importing fiftyone
+    os.environ["FIFTYONE_DATABASE_URI"] = f"mongodb://localhost:{args.port_database}"
 
-    # Ensure a fresh start to avoid stale lock files on the node
-    if os.path.exists(db_path):
-        try:
-            shutil.rmtree(db_path)
-        except OSError:
-            pass # Handle cases where dir is busy or permissions differ
-    os.makedirs(db_path, exist_ok=True)
+    print(f"Connecting to MongoDB at: localhost:{args.port_database}")
 
-    # Set Environment Variables
-    os.environ["FIFTYONE_DATABASE_DIR"] = db_path
-    os.environ["FIFTYONE_DATABASE_PORT"] = args.port_database
-
-    print(f"DB Path:{db_path}")
     print(f"--- CONNECTING TO MANUAL DB: localhost:44123 ---")
 
 

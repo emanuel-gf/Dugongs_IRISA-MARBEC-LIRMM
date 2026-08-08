@@ -22,3 +22,6 @@ chapter1_exploringID/studies/*
 *.parquet
 *.npz
 *.ckpt
+chapter3/image_results/
+chapter3/models_run/
+chapter2_FLPLAN/runs_hydra/config/paths/acacia.yaml

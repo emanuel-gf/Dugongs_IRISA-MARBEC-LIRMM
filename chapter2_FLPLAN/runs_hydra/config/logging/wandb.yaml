@@ -1,0 +1,8 @@
+enabled: true
+project: triplecheck
+entity: null             # your W&B username/org, null = default
+tags: []                 # populated dynamically from experiment config
+log_model: false
+log_every_n_steps: 20
+watch_model: false       # set true to log gradients/weights (expensive)
+

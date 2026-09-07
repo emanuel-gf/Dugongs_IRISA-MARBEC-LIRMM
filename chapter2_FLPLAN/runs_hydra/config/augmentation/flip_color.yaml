@@ -1,0 +1,16 @@
+name: flip_color   
+
+# flip params (shared)
+horizontal_flip_p: 0.7
+vertical_flip_p:   0.7
+
+# color params (flip_color only)
+brightness_limit:      0.2
+contrast_limit:        0.2
+brightness_contrast_p: 0.5
+hue_shift_limit:       10
+sat_shift_limit:       20
+val_shift_limit:       10
+hue_saturation_p:      0.3
+blur_limit:            5       # max kernel size (odd numbers only, so 3 or 5)
+blur_p:                0.2

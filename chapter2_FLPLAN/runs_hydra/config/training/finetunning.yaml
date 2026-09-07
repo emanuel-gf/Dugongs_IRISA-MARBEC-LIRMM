@@ -1,0 +1,17 @@
+lr: 2.0e-5
+backbone_lr_factor: 0.07
+weight_decay: 2.5e-3
+batch_size: 4
+
+# Step-based budget (preferred). Set max_epochs=null when using this.
+max_steps: 400
+max_epochs: null
+warmup_steps: 50
+warmup_epochs: null
+
+gradient_clip_val: 0.72
+precision: "16-mixed"
+log_every_n_steps: 20
+num_workers: 4
+use_early_stopping: false
+checkpoint_mode: last 

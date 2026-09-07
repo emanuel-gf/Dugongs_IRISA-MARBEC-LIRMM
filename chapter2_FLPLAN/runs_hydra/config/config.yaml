@@ -1,0 +1,68 @@
+defaults:
+  - model: rtdetr
+  - training: finetunning
+  - augmentation: flip_color
+  - paths: acacia
+  - logging: wandb
+  - _self_
+
+
+# checkpoint
+#nc_checkpoint_dir: null
+nc_checkpoint_dir: /share/home/e2406743/code/Dugongs_IRISA-MARBEC-LIRMM/chapter3/models_run/checkpoint/NNN_p100_random_seed0_rtdetr_0709_1910/hf_export
+
+# For fine tunning, do not use validation and therefore save on the last checkpoint
+checkpoint_mode: last
+use_early_stopping: false
+
+# Seed - Schema - Partition - method
+seed: 2
+schema: NNW
+partition : p50
+method: centroid
+
+# in config.yaml
+run_name: ${schema}_${partition}_seed${seed}_${now:%m%d_%H%M}
+
+data:
+  num_workers: 6
+  pin_memory : True
+
+## save model
+save_nc_local: true  # Set to false to skip saving weights
+save_checkpoints: true  # Existing flag for Lightning checkpoints 
+save_test_predictions: true #To save the predictions into a json format
+
+# lightning profiler.
+profiler: null
+
+logging.tags:
+    - ${schema}
+    - ${partition}
+    - ${method}
+    - ${model.name}
+    - seed${seed}
+
+# to hide subdir hydra: hydra.output_subdir: Null
+hydra:
+  run:
+    dir: ${paths.log_dir}/S${seed}_${schema}_${partition}_${method}_${now:%m%d_%H%M}
+  job_logging:
+    version: 1
+    formatters:
+      simple:
+        format: '[%(asctime)s][%(name)s][%(levelname)s] - %(message)s'
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: simple
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        formatter: simple
+        filename: ${hydra.run.dir}/train.log
+        mode: w
+    root:
+      level: INFO
+      handlers: [console, file]
+    disable_existing_loggers: false
